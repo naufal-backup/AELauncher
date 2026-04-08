@@ -1,11 +1,12 @@
 # AELauncher
 
-A modern, high-performance desktop launcher built with **Electron**, **React**, and **Vite**. AELauncher provides a seamless experience for managing and launching your favorite applications and games on Linux.
+A modern, high-performance **Arknights: Endfield Launcher** built with **Electron**, **React**, and **Vite**. AELauncher provides a seamless experience for managing and launching Arknights: Endfield on Linux.
 
 ![Build and Release](https://github.com/naufal-backup/AELauncher/actions/workflows/build.yml/badge.svg)
 
 ## 🚀 Features
 
+- **Arknights: Endfield Optimized**: Specifically designed for a smooth Arknights: Endfield experience on Linux.
 - **Blazing Fast**: Powered by Vite for near-instant development and optimized production builds.
 - **Modern UI**: Styled with Tailwind CSS and smooth animations using Framer Motion.
 - **Multi-Format Linux Support**: Automatically packaged as AppImage, DEB, and Pacman.
