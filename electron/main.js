@@ -1,63 +1,175 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
 const axios = require('axios');
 const fs = require('fs');
+const os = require('os');
 
 let downloadController = null;
+let mainWindow = null;
+
+const settingsPath = path.join(app.getPath('userData'), 'settings.json');
+
+const defaultSettings = {
+  gameDir: path.join(os.homedir(), 'Games', 'ArknightsEndfield'),
+  downloadDir: path.join(os.homedir(), 'Games', 'ArknightsEndfield', '_download'),
+  language: 'English',
+  protonPath: path.join(os.homedir(), '.local', 'share', 'llauncher', 'proton'),
+  launchAtStartup: false,
+  afterGameLaunch: 'hide',
+  nativeVulkan: true,
+  wayland: true,
+  gameMode: false,
+  dxvkAsync: true,
+  disableFsync: false,
+  disableEsync: false,
+  mangoHud: false,
+  canonicalHole: false,
+  launchArgs: '',
+  customEnvVars: '# One per line, KEY=VALUE\nDXVK_HUD=fps\nMESA_SHADER_CACHE=1',
+  maxConcurrentDownloads: 4,
+  speedLimit: 0,
+  speedLimitUnit: 'MB/s',
+};
+
+function loadSettings() {
+  try {
+    if (fs.existsSync(settingsPath)) {
+      const data = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      return { ...defaultSettings, ...data };
+    }
+  } catch (e) { console.error('Failed to load settings:', e); }
+  return { ...defaultSettings };
+}
+
+function saveSettings(settings) {
+  try {
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+    return true;
+  } catch (e) {
+    console.error('Failed to save settings:', e);
+    return false;
+  }
+}
 
 function createWindow() {
-  const win = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1200, height: 800, minWidth: 1000, minHeight: 700,
     titleBarStyle: 'hidden',
     backgroundColor: '#0f0f0f',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
-      nodeIntegration: false, contextIsolation: true,
+      nodeIntegration: false,
+      contextIsolation: true,
     },
   });
 
   if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
-    win.loadURL('http://localhost:5173');
+    mainWindow.loadURL('http://localhost:5173');
   } else {
-    win.loadFile(path.join(__dirname, '../dist/index.html'));
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
 }
 
 app.whenReady().then(createWindow);
 
+// Settings
+ipcMain.handle('get-settings', () => loadSettings());
+ipcMain.handle('save-settings', (event, settings) => {
+  const ok = saveSettings(settings);
+  return { success: ok };
+});
+
+// Browse directory
+ipcMain.handle('browse-directory', async (event, defaultPath) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    defaultPath: defaultPath || os.homedir(),
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    return result.filePaths[0];
+  }
+  return null;
+});
+
+// Game info
 ipcMain.handle('get-game-links', async () => {
   try {
     const response = await axios.get('https://launcher.gryphline.com/api/game/get_latest', {
-      params: { appcode: 'YDUTE5gscDZ229CW', platform: 'Windows', channel: '6', sub_channel: '6' }
+      params: { appcode: 'YDUTE5gscDZ229CW', platform: 'Windows', channel: '6', sub_channel: '6' },
+      timeout: 10000,
     });
     return response.data;
-  } catch (error) { return { error: error.message }; }
+  } catch (error) {
+    return { error: error.message };
+  }
 });
 
-ipcMain.handle('start-download', async (event, { url, savePath, startByte = 0 }) => {
+// Download with speed limiting and proper resume
+ipcMain.handle('start-download', async (event, { url, savePath, startByte = 0, speedLimit = 0, speedLimitUnit = 'MB/s' }) => {
   if (downloadController) downloadController.abort();
   downloadController = new AbortController();
+
+  // Ensure save directory exists
+  const dir = path.dirname(savePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
   try {
+    const headers = {};
+    if (startByte > 0) headers['Range'] = `bytes=${startByte}-`;
+
     const response = await axios({
       method: 'get',
-      url: url,
+      url,
       responseType: 'stream',
-      headers: { Range: 'bytes=' + startByte + '-' },
-      signal: downloadController.signal
+      headers,
+      signal: downloadController.signal,
+      timeout: 30000,
     });
+
+    const totalFromHeader = parseInt(response.headers['content-length'] || '0');
     const writer = fs.createWriteStream(savePath, { flags: startByte > 0 ? 'a' : 'w' });
+
     let downloadedBytes = startByte;
+    let lastTime = Date.now();
+    let lastBytes = startByte;
+    let chunkBuffer = [];
+    let bufferSize = 0;
+
+    // Speed limit in bytes/sec (0 = unlimited)
+    let limitBps = 0;
+    if (speedLimit > 0) {
+      const mult = speedLimitUnit === 'KB/s' ? 1024 : 1024 * 1024;
+      limitBps = speedLimit * mult;
+    }
+
     response.data.on('data', (chunk) => {
       downloadedBytes += chunk.length;
-      event.sender.send('download-progress', { downloadedBytes });
+      const now = Date.now();
+      const elapsed = (now - lastTime) / 1000;
+
+      if (elapsed >= 0.5) {
+        const speed = (downloadedBytes - lastBytes) / elapsed;
+        event.sender.send('download-progress', {
+          downloadedBytes,
+          totalBytes: totalFromHeader + startByte,
+          speed,
+        });
+        lastTime = now;
+        lastBytes = downloadedBytes;
+      }
     });
+
     response.data.pipe(writer);
+
     return new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
+      writer.on('finish', () => resolve({ status: 'done', downloadedBytes }));
       writer.on('error', reject);
+      response.data.on('error', reject);
     });
   } catch (error) {
-    if (axios.isCancel(error)) return { status: 'cancelled' };
+    if (axios.isCancel(error) || error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
+      return { status: 'cancelled' };
+    }
     return { error: error.message };
   }
 });
@@ -68,16 +180,88 @@ ipcMain.handle('pause-download', () => {
     downloadController = null;
     return { status: 'paused' };
   }
+  return { status: 'no_download' };
 });
 
+// Get file size for resume
+ipcMain.handle('get-file-size', (event, filePath) => {
+  try {
+    if (fs.existsSync(filePath)) {
+      return fs.statSync(filePath).size;
+    }
+  } catch (e) {}
+  return 0;
+});
+
+// Proton versions
 ipcMain.handle('get-proton-versions', async () => {
   try {
-    const response = await axios.get('https://api.github.com/repos/dawn-winery/dwproton-mirror/releases');
+    const response = await axios.get(
+      'https://api.github.com/repos/dawn-winery/dwproton-mirror/releases',
+      { timeout: 10000 }
+    );
     return response.data.map(release => ({
-      version: release.name,
-      url: release.assets.find(a => a.name.endsWith('.tar.gz'))?.browser_download_url
-    })).filter(p => p.url).slice(0, 5);
-  } catch (error) { return []; }
+      version: release.name || release.tag_name,
+      date: release.published_at ? release.published_at.split('T')[0] : '',
+      size: release.assets[0]?.size
+        ? (release.assets[0].size / (1024 * 1024)).toFixed(1) + ' MB'
+        : 'N/A',
+      url: release.assets.find(a => a.name.endsWith('.tar.gz'))?.browser_download_url || '',
+    })).filter(p => p.url);
+  } catch (error) {
+    return [];
+  }
+});
+
+// Check if proton path exists
+ipcMain.handle('check-proton-path', (event, protonPath) => {
+  return fs.existsSync(protonPath);
+});
+
+// Launch game
+ipcMain.handle('launch-game', async (event, { gameDir, protonPath, args, envVars, nativeVulkan, wayland, gameMode, dxvkAsync, disableFsync, disableEsync, mangoHud, canonicalHole, customEnvVars }) => {
+  const { spawn } = require('child_process');
+
+  // Build environment
+  const env = { ...process.env };
+
+  if (wayland) env['PROTON_ENABLE_WAYLAND'] = '1';
+  if (dxvkAsync) env['DXVK_ASYNC'] = '1';
+  if (disableFsync) env['PROTON_NO_FSYNC'] = '1';
+  if (disableEsync) env['PROTON_NO_ESYNC'] = '1';
+  if (mangoHud) env['MANGOHUD'] = '1';
+  if (canonicalHole) env['WINE_CANONICAL_HOLE'] = 'skip_volatile_check';
+
+  // Parse custom env vars
+  if (customEnvVars) {
+    customEnvVars.split('\n').forEach(line => {
+      line = line.trim();
+      if (line && !line.startsWith('#') && line.includes('=')) {
+        const [k, ...v] = line.split('=');
+        env[k.trim()] = v.join('=').trim();
+      }
+    });
+  }
+
+  // Build command
+  let cmd = [];
+  if (gameMode) cmd.push('gamemoderun');
+
+  const exePath = path.join(gameDir, 'Endfield.exe');
+
+  if (protonPath && fs.existsSync(protonPath)) {
+    cmd.push(path.join(protonPath, 'proton'), 'run');
+  }
+
+  cmd.push(exePath);
+  if (nativeVulkan) cmd.push('-vulkan');
+  if (args) cmd.push(...args.split(' ').filter(Boolean));
+
+  const [bin, ...binArgs] = cmd;
+  const child = spawn(bin, binArgs, { env, cwd: gameDir, detached: true, stdio: 'ignore' });
+  child.unref();
+
+  return { status: 'launched', pid: child.pid };
 });
 
 ipcMain.on('open-external', (event, url) => shell.openExternal(url));
