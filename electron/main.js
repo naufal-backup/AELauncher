@@ -1,8 +1,9 @@
-const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, protocol } = require('electron');
 const path = require('path');
 const axios = require('axios');
 const fs = require('fs');
 const os = require('os');
+const { spawn } = require('child_process');
 
 let downloadController = null;
 let mainWindow = null;
@@ -30,11 +31,11 @@ const defaultSettings = {
   speedLimit: 0,
   speedLimitUnit: 'MB/s',
   // Appearance
-  backgroundPath: '',
+  backgroundPath: path.join(os.homedir(), 'Downloads', 'kv_v1d1.3df4b429.jpg'),
   backgroundOffsetX: 50,
   backgroundOffsetY: 50,
-  backgroundZoom: 110,
-  overlayOpacity: 0.6,
+  backgroundZoom: 100,
+  overlayOpacity: 0.4,
 };
 
 function loadSettings() {
@@ -58,6 +59,16 @@ function saveSettings(settings) {
 }
 
 function createWindow() {
+  // Register local-resource protocol to load images from disk
+  protocol.registerFileProtocol('local-resource', (request, callback) => {
+    const url = request.url.replace(/^local-resource:\/\//, '');
+    try {
+      return callback(decodeURIComponent(url));
+    } catch (error) {
+      console.error(error);
+    }
+  });
+
   mainWindow = new BrowserWindow({
     width: 1200, height: 800, minWidth: 1000, minHeight: 700,
     titleBarStyle: 'hidden',
@@ -127,67 +138,91 @@ ipcMain.handle('get-game-links', async () => {
 });
 
 // Download with speed limiting and proper resume
-ipcMain.handle('start-download', async (event, { url, savePath, startByte = 0, speedLimit = 0, speedLimitUnit = 'MB/s' }) => {
+async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 0, speedLimitUnit = 'MB/s', partIndex, totalParts, overallDownloaded }) {
+  const headers = {};
+  if (startByte > 0) headers['Range'] = `bytes=${startByte}-`;
+
+  const response = await axios({
+    method: 'get',
+    url,
+    responseType: 'stream',
+    headers,
+    signal: downloadController.signal,
+    timeout: 30000,
+  });
+
+  const totalFromHeader = parseInt(response.headers['content-length'] || '0');
+  const writer = fs.createWriteStream(savePath, { flags: startByte > 0 ? 'a' : 'w' });
+
+  let partDownloaded = startByte;
+  let lastTime = Date.now();
+  let lastOverall = overallDownloaded;
+
+  response.data.on('data', (chunk) => {
+    partDownloaded += chunk.length;
+    const now = Date.now();
+    const elapsed = (now - lastTime) / 1000;
+
+    if (elapsed >= 0.5) {
+      const currentOverall = lastOverall + (partDownloaded - startByte);
+      const speed = (currentOverall - lastOverall) / elapsed;
+      event.sender.send('download-progress', {
+        downloadedBytes: currentOverall,
+        partIndex,
+        totalParts,
+        speed,
+      });
+      // We don't update lastOverall here, it's updated on the next 0.5s interval relative to the start of this part
+    }
+  });
+
+  response.data.pipe(writer);
+
+  return new Promise((resolve, reject) => {
+    writer.on('finish', () => resolve({ downloadedBytes: partDownloaded }));
+    writer.on('error', reject);
+    response.data.on('error', reject);
+  });
+}
+
+ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit, speedLimitUnit }) => {
   if (downloadController) downloadController.abort();
   downloadController = new AbortController();
 
-  // Ensure save directory exists
-  const dir = path.dirname(savePath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
+
+  let overallDownloaded = 0;
+  // Calculate already downloaded bytes from existing files
+  for (let i = 0; i < packs.length; i++) {
+    const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
+    if (fs.existsSync(savePath)) {
+      overallDownloaded += fs.statSync(savePath).size;
+    }
+  }
 
   try {
-    const headers = {};
-    if (startByte > 0) headers['Range'] = `bytes=${startByte}-`;
-
-    const response = await axios({
-      method: 'get',
-      url,
-      responseType: 'stream',
-      headers,
-      signal: downloadController.signal,
-      timeout: 30000,
-    });
-
-    const totalFromHeader = parseInt(response.headers['content-length'] || '0');
-    const writer = fs.createWriteStream(savePath, { flags: startByte > 0 ? 'a' : 'w' });
-
-    let downloadedBytes = startByte;
-    let lastTime = Date.now();
-    let lastBytes = startByte;
-    let chunkBuffer = [];
-    let bufferSize = 0;
-
-    // Speed limit in bytes/sec (0 = unlimited)
-    let limitBps = 0;
-    if (speedLimit > 0) {
-      const mult = speedLimitUnit === 'KB/s' ? 1024 : 1024 * 1024;
-      limitBps = speedLimit * mult;
+    for (let i = 0; i < packs.length; i++) {
+      const pack = packs[i];
+      const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
+      const existingSize = fs.existsSync(savePath) ? fs.statSync(savePath).size : 0;
+      
+      // If file already exists and is complete (this is a simple check, ideally we'd check against expected size)
+      // For now, let's just download if it's less than expected or just proceed
+      
+      await downloadPart(event, {
+        url: pack.url,
+        savePath,
+        startByte: existingSize,
+        speedLimit,
+        speedLimitUnit,
+        partIndex: i,
+        totalParts: packs.length,
+        overallDownloaded
+      });
+      
+      overallDownloaded += (fs.statSync(savePath).size - existingSize);
     }
-
-    response.data.on('data', (chunk) => {
-      downloadedBytes += chunk.length;
-      const now = Date.now();
-      const elapsed = (now - lastTime) / 1000;
-
-      if (elapsed >= 0.5) {
-        const speed = (downloadedBytes - lastBytes) / elapsed;
-        event.sender.send('download-progress', {
-          downloadedBytes,
-          totalBytes: totalFromHeader + startByte,
-          speed,
-        });
-        lastTime = now;
-        lastBytes = downloadedBytes;
-      }
-    });
-
-    response.data.pipe(writer);
-
-    return new Promise((resolve, reject) => {
-      writer.on('finish', () => resolve({ status: 'done', downloadedBytes }));
-      writer.on('error', reject);
-      response.data.on('error', reject);
-    });
+    return { status: 'done' };
   } catch (error) {
     if (axios.isCancel(error) || error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
       return { status: 'cancelled' };
@@ -195,6 +230,49 @@ ipcMain.handle('start-download', async (event, { url, savePath, startByte = 0, s
     return { error: error.message };
   }
 });
+
+// Extract game parts
+ipcMain.handle('extract-game', async (event, { downloadDir, gameDir }) => {
+  if (!fs.existsSync(gameDir)) fs.mkdirSync(gameDir, { recursive: true });
+  
+  // We'll extract all .zip files in downloadDir to gameDir
+  // Using 7z if available, otherwise fallback or error
+  return new Promise((resolve, reject) => {
+    const parts = fs.readdirSync(downloadDir).filter(f => f.endsWith('.zip')).sort();
+    if (parts.length === 0) return reject(new Error('No zip files found to extract'));
+
+    // Extracting the first part of a multi-part zip usually handles the rest if they are named correctly
+    // But since these might be independent zips, we extract them one by one or as a set
+    
+    // For simplicity, let's extract them sequentially
+    let currentPart = 0;
+    
+    const extractNext = () => {
+      if (currentPart >= parts.length) {
+        return resolve({ status: 'done' });
+      }
+      
+      const partPath = path.join(downloadDir, parts[currentPart]);
+      event.sender.send('extract-progress', { status: 'extracting', message: `Extracting ${parts[currentPart]}...`, partIndex: currentPart, totalParts: parts.length });
+      
+      const unzip = spawn('unzip', ['-o', partPath, '-d', gameDir]);
+      
+      unzip.on('close', (code) => {
+        if (code === 0) {
+          currentPart++;
+          extractNext();
+        } else {
+          resolve({ status: 'error', message: `Unzip failed with code ${code} for ${parts[currentPart]}` });
+        }
+      });
+      
+      unzip.on('error', (err) => resolve({ status: 'error', message: err.message }));
+    };
+
+    extractNext();
+  });
+});
+
 
 ipcMain.handle('pause-download', () => {
   if (downloadController) {

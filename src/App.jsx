@@ -72,9 +72,9 @@ function SettingsModal({ onClose, settings, onSave }) {
     checkProtonStatus();
   }, [local.protonPath]);
 
-  // Listen for extract-progress events
+  // Listen for extract-progress events for Proton
   useEffect(() => {
-    window.electron.onExtractProgress((data) => {
+    const unsub = window.electron.onExtractProgress((data) => {
       if (data.status === 'done') {
         setPvState(prev => {
           const extractingVer = Object.keys(prev).find(v => prev[v].phase === 'extracting');
@@ -86,6 +86,10 @@ function SettingsModal({ onClose, settings, onSave }) {
         checkProtonStatus();
       }
     });
+    return () => {
+      if (typeof unsub === 'function') unsub();
+      else window.electron.removeExtractProgress();
+    };
   }, []);
 
   const handleInstallProton = async (p) => {
@@ -125,12 +129,19 @@ function SettingsModal({ onClose, settings, onSave }) {
     if (dir) set(key, dir);
   };
 
+  const browseBackground = async () => {
+    const file = await window.electron.browseFile({
+      filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp'] }]
+    });
+    if (file) set('backgroundPath', file);
+  };
+
   const handleSave = () => {
     onSave(local);
     onClose();
   };
 
-  const tabs = ['Paths', 'Proton', 'Launch', 'Downloads'];
+  const tabs = ['Paths', 'Proton', 'Appearance', 'Launch', 'Downloads'];
 
   return (
     <motion.div
@@ -212,6 +223,69 @@ function SettingsModal({ onClose, settings, onSave }) {
                     { value: 'Japanese', label: 'Japanese' },
                     { value: 'Korean', label: 'Korean' },
                   ]}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* ── APPEARANCE ── */}
+          {tab === 'appearance' && (
+            <div className="settings-section">
+              <div className="setting-row">
+                <label>Background image</label>
+                <div className="path-input-row">
+                  <input
+                    value={local.backgroundPath}
+                    onChange={e => set('backgroundPath', e.target.value)}
+                    placeholder="Path to image..."
+                  />
+                  <button className="browse-btn" onClick={browseBackground}>
+                    Browse
+                  </button>
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <label>Background zoom: {local.backgroundZoom}%</label>
+                <input
+                  type="range"
+                  min="100" max="200"
+                  value={local.backgroundZoom}
+                  onChange={e => set('backgroundZoom', parseInt(e.target.value))}
+                  className="range-input"
+                />
+              </div>
+
+              <div className="setting-row">
+                <label>Horizontal position: {local.backgroundOffsetX}%</label>
+                <input
+                  type="range"
+                  min="0" max="100"
+                  value={local.backgroundOffsetX}
+                  onChange={e => set('backgroundOffsetX', parseInt(e.target.value))}
+                  className="range-input"
+                />
+              </div>
+
+              <div className="setting-row">
+                <label>Vertical position: {local.backgroundOffsetY}%</label>
+                <input
+                  type="range"
+                  min="0" max="100"
+                  value={local.backgroundOffsetY}
+                  onChange={e => set('backgroundOffsetY', parseInt(e.target.value))}
+                  className="range-input"
+                />
+              </div>
+
+              <div className="setting-row">
+                <label>Overlay opacity: {Math.round(local.overlayOpacity * 100)}%</label>
+                <input
+                  type="range"
+                  min="0" max="100"
+                  value={local.overlayOpacity * 100}
+                  onChange={e => set('overlayOpacity', parseInt(e.target.value) / 100)}
+                  className="range-input"
                 />
               </div>
             </div>
@@ -470,9 +544,13 @@ export default function App() {
 
   const [isDownloading, setIsDownloading] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [extractMsg, setExtractMsg] = useState('');
+  
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [totalBytes, setTotalBytes] = useState(0);
+  const [activePart, setActivePart] = useState(0);
 
   const progressListenerRef = useRef(false);
 
@@ -499,40 +577,49 @@ export default function App() {
       window.electron.onDownloadProgress((data) => {
         setDownloadedBytes(data.downloadedBytes || 0);
         setDownloadSpeed(data.speed || 0);
-        if (data.totalBytes) setTotalBytes(data.totalBytes);
+        setActivePart(data.partIndex || 0);
+      });
+      window.electron.onExtractProgress((data) => {
+        if (data.status === 'extracting') {
+          setIsExtracting(true);
+          setExtractMsg(data.message);
+        } else if (data.status === 'done') {
+          setIsExtracting(false);
+          setExtractMsg('Done!');
+        }
       });
     }
   }, []);
 
-  const getSavePath = (packIndex = 0) => {
-    const dir = settings?.downloadDir || '/tmp';
-    return `${dir}/Endfield_Part_${packIndex + 1}.zip`;
-  };
-
   const handleDownload = async () => {
     if (!gameInfo?.pkg?.packs?.length) return;
-    const pack = gameInfo.pkg.packs[0];
-    const savePath = getSavePath(0);
-
-    // Check resume
-    const existingSize = await window.electron.getFileSize(savePath);
-
+    
     setIsDownloading(true);
     setIsPaused(false);
-    if (existingSize === 0) setDownloadedBytes(0);
 
     try {
-      await window.electron.startDownload({
-        url: pack.url,
-        savePath,
-        startByte: existingSize,
+      const result = await window.electron.startDownload({
+        packs: gameInfo.pkg.packs,
+        downloadDir: settings.downloadDir,
         speedLimit: settings?.speedLimit || 0,
         speedLimitUnit: settings?.speedLimitUnit || 'MB/s',
       });
+      
       setIsDownloading(false);
+
+      if (result?.status === 'done') {
+        // Start extraction
+        setIsExtracting(true);
+        await window.electron.extractGame({
+          downloadDir: settings.downloadDir,
+          gameDir: settings.gameDir
+        });
+        setIsExtracting(false);
+      }
     } catch (e) {
       console.error(e);
       setIsDownloading(false);
+      setIsExtracting(false);
     }
   };
 
@@ -587,14 +674,23 @@ export default function App() {
     ? (parseInt(gameInfo.pkg.total_size) / 1e9).toFixed(2) + ' GB'
     : '—';
 
-  const statusLabel = isDownloading
-    ? `${fmtSpeed(downloadSpeed)}`
+  const statusLabel = isExtracting
+    ? `Extracting...`
+    : isDownloading
+    ? `Downloading Part ${activePart + 1}/${gameInfo?.pkg?.packs?.length}`
     : isPaused
     ? 'Paused'
     : 'Ready to download';
 
+  const bgStyle = settings?.backgroundPath ? {
+    backgroundImage: `url("local-resource://${settings.backgroundPath}")`,
+    backgroundSize: `${settings.backgroundZoom || 100}%`,
+    backgroundPosition: `${settings.backgroundOffsetX || 50}% ${settings.backgroundOffsetY || 50}%`,
+  } : {};
+
   return (
-    <div className="launcher-container">
+    <div className="launcher-container" style={bgStyle}>
+      <div className="overlay" style={{ opacity: settings?.overlayOpacity ?? 0.4 }} />
       {/* Custom Titlebar */}
       <div className="titlebar">
         <div className="titlebar-drag" />

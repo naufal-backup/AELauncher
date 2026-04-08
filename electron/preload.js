@@ -7,11 +7,16 @@ contextBridge.exposeInMainWorld('electron', {
   // Download
   startDownload: (args) => ipcRenderer.invoke('start-download', args),
   pauseDownload: () => ipcRenderer.invoke('pause-download'),
+  extractGame: (args) => ipcRenderer.invoke('extract-game', args),
   getFileSize: (filePath) => ipcRenderer.invoke('get-file-size', filePath),
   onDownloadProgress: (callback) =>
     ipcRenderer.on('download-progress', (event, data) => callback(data)),
   removeDownloadProgress: () =>
     ipcRenderer.removeAllListeners('download-progress'),
+  onExtractProgress: (callback) =>
+    ipcRenderer.on('extract-progress', (event, data) => callback(data)),
+  removeExtractProgress: () =>
+    ipcRenderer.removeAllListeners('extract-progress'),
 
   // Proton
   getProtonVersions: () => ipcRenderer.invoke('get-proton-versions'),

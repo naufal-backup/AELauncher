@@ -4,16 +4,30 @@
   flex-direction: column;
   width: 100%;
   height: 100vh;
-  background: linear-gradient(135deg, #050505 0%, #121212 100%);
+  background-color: #000;
+  background-repeat: no-repeat;
   color: #fff;
   user-select: none;
   overflow: hidden;
+  position: relative;
+}
+
+.overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  z-index: 0;
+  pointer-events: none;
 }
 
 .launcher-body {
   display: flex;
   flex: 1;
   overflow: hidden;
+  z-index: 1;
 }
 
 /* ─── Sidebar ───────────────────────────────────────────────────────────────── */
@@ -94,9 +108,6 @@
   flex-direction: column;
   justify-content: flex-end;
   padding-bottom: 48px;
-  background-image: url('https://launcher.gryphline.com/theme/endfield/default_background.webp');
-  background-size: cover;
-  background-position: center;
   margin: -64px;
   padding: 64px;
   min-height: 100%;
@@ -265,9 +276,9 @@
   font-weight: 600;
 }
 .config-tag-exp {
-  background: rgba(251, 146, 60, 0.15);
-  color: #fb923c;
-  border-color: rgba(251, 146, 60, 0.3);
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.3);
 }
 
 /* ─── Loader ────────────────────────────────────────────────────────────────── */
@@ -727,3 +738,24 @@
   line-height: 1;
 }
 .no-drag { -webkit-app-region: no-drag; }
+
+/* ─── Range Input ─────────────────────────────────────────────────────────── */
+.range-input {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  outline: none;
+  -webkit-appearance: none;
+  margin-top: 8px;
+}
+
+.range-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  background: #facc15;
+  border-radius: 50%;
+  cursor: pointer;
+  box-shadow: 0 0 10px rgba(250, 204, 21, 0.4);
+}
