@@ -12,9 +12,9 @@
     "appId": "com.aelauncher.app",
     "productName": "AELauncher",
     "directories": {
-      "output": "dist_electron"
+      "output": "dist_electron",
+      "buildResources": "build"
     },
-    "icon": "build/icon.png",
     "files": [
       "dist/**/*",
       "electron/**/*",
@@ -26,8 +26,9 @@
         "deb",
         "pacman"
       ],
-      "category": "Game"
-    }
+      "category": "Game",
+      "icon": "icon.png"
+    },
   },
   "scripts": {
     "dev": "concurrently \"npm run vite\" \"npm run electron\"",
