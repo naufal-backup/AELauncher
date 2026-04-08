@@ -28,7 +28,7 @@
       ],
       "category": "Game",
       "icon": "icon.png"
-    },
+    }
   },
   "scripts": {
     "dev": "concurrently \"npm run vite\" \"npm run electron\"",
