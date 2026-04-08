@@ -735,9 +735,13 @@ export default function App() {
     : isExtracting
     ? `Extracting... ${extractMsg}`
     : isDownloading
+<<<<<<< HEAD
     ? `Downloading`
     : isDownloadComplete
     ? 'Download complete'
+=======
+    ? `Downloading Part ${activePart + 1}/${gameInfo?.pkg?.packs?.length}`
+>>>>>>> parent of 8c9baf4 (Update App.jsx)
     : isPaused
     ? 'Paused'
     : 'Ready to download';
