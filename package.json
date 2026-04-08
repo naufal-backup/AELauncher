@@ -32,7 +32,7 @@
     "dev": "concurrently \"npm run vite\" \"npm run electron\"",
     "vite": "vite",
     "electron": "wait-on http://localhost:5173 && electron .",
-    "build": "vite build && electron-builder",
+    "build": "vite build && electron-builder --publish never",
     "preview": "vite preview"
   },
   "dependencies": {
