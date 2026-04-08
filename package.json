@@ -2,6 +2,11 @@
   "name": "aelauncher",
   "private": true,
   "version": "0.1.0",
+  "author": {
+    "name": "Naufal",
+    "email": "naufal@example.com"
+  },
+  "description": "AELauncher - A modern launcher for apps and games.",
   "main": "electron/main.js",
   "build": {
     "appId": "com.aelauncher.app",
