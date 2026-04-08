@@ -380,6 +380,14 @@ function SettingsModal({ onClose, settings, onSave }) {
                 <Toggle value={local.launchAtStartup} onChange={v => set('launchAtStartup', v)} />
               </div>
 
+              <div className="setting-row toggle-row">
+                <div className="toggle-info">
+                  <span className="toggle-label">Minimize to Tray</span>
+                  <span className="toggle-desc">Closing the window will hide it to the system tray</span>
+                </div>
+                <Toggle value={local.minimizeToTray} onChange={v => set('minimizeToTray', v)} />
+              </div>
+
               <div className="setting-row">
                 <label>After game launch</label>
                 <Select

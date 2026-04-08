@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, dialog, protocol } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, protocol, Tray, Menu } = require('electron');
 const path = require('path');
 const axios = require('axios');
 const fs = require('fs');
@@ -7,6 +7,8 @@ const { spawn } = require('child_process');
 
 let downloadController = null;
 let mainWindow = null;
+let tray = null;
+let isQuitting = false;
 
 const settingsPath = path.join(app.getPath('userData'), 'settings.json');
 
@@ -16,6 +18,7 @@ const defaultSettings = {
   language: 'English',
   protonPath: path.join(os.homedir(), '.local', 'share', 'llauncher', 'proton'),
   launchAtStartup: false,
+  minimizeToTray: true,
   afterGameLaunch: 'hide',
   nativeVulkan: true,
   wayland: true,
@@ -58,6 +61,33 @@ function saveSettings(settings) {
   }
 }
 
+function createTray() {
+  const iconPath = path.join(__dirname, '../build/icon.png');
+  if (!fs.existsSync(iconPath)) return;
+
+  tray = new Tray(iconPath);
+  const contextMenu = Menu.buildFromTemplate([
+    { label: 'Show AELauncher', click: () => mainWindow?.show() },
+    { type: 'separator' },
+    { label: 'Quit', click: () => {
+        isQuitting = true;
+        app.quit();
+      }
+    }
+  ]);
+
+  tray.setToolTip('AELauncher');
+  tray.setContextMenu(contextMenu);
+
+  tray.on('click', () => {
+    if (mainWindow?.isVisible()) {
+      mainWindow.hide();
+    } else {
+      mainWindow?.show();
+    }
+  });
+}
+
 function createWindow() {
   // Register local-resource protocol to load images from disk
   protocol.registerFileProtocol('local-resource', (request, callback) => {
@@ -73,6 +103,7 @@ function createWindow() {
     width: 1200, height: 800, minWidth: 1000, minHeight: 700,
     titleBarStyle: 'hidden',
     backgroundColor: '#0f0f0f',
+    icon: path.join(__dirname, '../build/icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -85,9 +116,20 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
+
+  mainWindow.on('close', (event) => {
+    const settings = loadSettings();
+    if (settings.minimizeToTray && !isQuitting) {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+  });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  createWindow();
+  createTray();
+});
 
 // Settings
 ipcMain.handle('get-settings', () => loadSettings());
