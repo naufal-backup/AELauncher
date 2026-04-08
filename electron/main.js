@@ -180,51 +180,65 @@ ipcMain.handle('get-game-links', async () => {
 });
 
 // Download with speed limiting and proper resume
-async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 0, speedLimitUnit = 'MB/s', partIndex, totalParts, overallDownloaded }) {
+async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 0, speedLimitUnit = 'MB/s', partIndex, totalParts, overallDownloaded, expectedSize }) {
+  // If we already have the full file, just return its size
+  if (expectedSize && startByte >= expectedSize) {
+    return { downloadedBytes: startByte };
+  }
+
   const headers = {};
   if (startByte > 0) headers['Range'] = `bytes=${startByte}-`;
 
-  const response = await axios({
-    method: 'get',
-    url,
-    responseType: 'stream',
-    headers,
-    signal: downloadController.signal,
-    timeout: 30000,
-  });
+  try {
+    const response = await axios({
+      method: 'get',
+      url,
+      responseType: 'stream',
+      headers,
+      signal: downloadController.signal,
+      timeout: 30000,
+    });
 
-  const totalFromHeader = parseInt(response.headers['content-length'] || '0');
-  const writer = fs.createWriteStream(savePath, { flags: startByte > 0 ? 'a' : 'w' });
+    const totalFromHeader = parseInt(response.headers['content-length'] || '0');
+    const writer = fs.createWriteStream(savePath, { flags: startByte > 0 ? 'a' : 'w' });
 
-  let partDownloaded = startByte;
-  let lastTime = Date.now();
-  let lastOverall = overallDownloaded;
+    let partDownloaded = startByte;
+    let lastTime = Date.now();
+    let lastOverall = overallDownloaded;
 
-  response.data.on('data', (chunk) => {
-    partDownloaded += chunk.length;
-    const now = Date.now();
-    const elapsed = (now - lastTime) / 1000;
+    response.data.on('data', (chunk) => {
+      partDownloaded += chunk.length;
+      const now = Date.now();
+      const elapsed = (now - lastTime) / 1000;
 
-    if (elapsed >= 0.5) {
-      const currentOverall = lastOverall + (partDownloaded - startByte);
-      const speed = (currentOverall - lastOverall) / elapsed;
-      event.sender.send('download-progress', {
-        downloadedBytes: currentOverall,
-        partIndex,
-        totalParts,
-        speed,
-      });
-      // We don't update lastOverall here, it's updated on the next 0.5s interval relative to the start of this part
+      if (elapsed >= 0.5) {
+        const currentOverall = lastOverall + (partDownloaded - startByte);
+        const speed = (currentOverall - lastOverall) / elapsed;
+        event.sender.send('download-progress', {
+          downloadedBytes: currentOverall,
+          partIndex,
+          totalParts,
+          speed,
+        });
+        lastTime = now;
+        lastOverall = currentOverall;
+      }
+    });
+
+    response.data.pipe(writer);
+
+    return new Promise((resolve, reject) => {
+      writer.on('finish', () => resolve({ downloadedBytes: partDownloaded }));
+      writer.on('error', reject);
+      response.data.on('error', reject);
+    });
+  } catch (error) {
+    // If range is not satisfiable, it usually means we already have the whole file
+    if (error.response && error.response.status === 416) {
+      return { downloadedBytes: startByte };
     }
-  });
-
-  response.data.pipe(writer);
-
-  return new Promise((resolve, reject) => {
-    writer.on('finish', () => resolve({ downloadedBytes: partDownloaded }));
-    writer.on('error', reject);
-    response.data.on('error', reject);
-  });
+    throw error;
+  }
 }
 
 ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit, speedLimitUnit }) => {
@@ -247,11 +261,9 @@ ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit,
       const pack = packs[i];
       const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
       const existingSize = fs.existsSync(savePath) ? fs.statSync(savePath).size : 0;
+      const expectedSize = parseInt(pack.size || '0');
       
-      // If file already exists and is complete (this is a simple check, ideally we'd check against expected size)
-      // For now, let's just download if it's less than expected or just proceed
-      
-      await downloadPart(event, {
+      const result = await downloadPart(event, {
         url: pack.url,
         savePath,
         startByte: existingSize,
@@ -259,10 +271,16 @@ ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit,
         speedLimitUnit,
         partIndex: i,
         totalParts: packs.length,
-        overallDownloaded
+        overallDownloaded,
+        expectedSize
       });
       
-      overallDownloaded += (fs.statSync(savePath).size - existingSize);
+      // Update overallDownloaded with the actual bytes on disk after this part's attempt
+      if (fs.existsSync(savePath)) {
+        const finalPartSize = fs.statSync(savePath).size;
+        // The difference between what we had before starting this part and what we have now
+        overallDownloaded += (finalPartSize - existingSize);
+      }
     }
     return { status: 'done' };
   } catch (error) {
