@@ -3,6 +3,26 @@
   "private": true,
   "version": "0.1.0",
   "main": "electron/main.js",
+  "build": {
+    "appId": "com.aelauncher.app",
+    "productName": "AELauncher",
+    "directories": {
+      "output": "dist_electron"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb",
+        "pacman"
+      ],
+      "category": "Game"
+    }
+  },
   "scripts": {
     "dev": "concurrently \"npm run vite\" \"npm run electron\"",
     "vite": "vite",

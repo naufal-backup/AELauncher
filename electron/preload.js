@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld('electron', {
   // Proton
   getProtonVersions: () => ipcRenderer.invoke('get-proton-versions'),
   checkProtonPath: (p) => ipcRenderer.invoke('check-proton-path', p),
+  extractProton: (args) => ipcRenderer.invoke('extract-proton', args),
+  onExtractProgress: (callback) =>
+    ipcRenderer.on('extract-progress', (event, data) => callback(data)),
 
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),
@@ -23,10 +26,16 @@ contextBridge.exposeInMainWorld('electron', {
 
   // Browse
   browseDirectory: (defaultPath) => ipcRenderer.invoke('browse-directory', defaultPath),
+  browseFile: (opts) => ipcRenderer.invoke('browse-file', opts),
 
   // Launch
   launchGame: (opts) => ipcRenderer.invoke('launch-game', opts),
 
   // Misc
   openExternal: (url) => ipcRenderer.send('open-external', url),
+
+  // Window controls
+  windowMinimize: () => ipcRenderer.send('window-minimize'),
+  windowMaximize: () => ipcRenderer.send('window-maximize'),
+  windowClose: () => ipcRenderer.send('window-close'),
 });

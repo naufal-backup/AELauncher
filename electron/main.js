@@ -29,6 +29,12 @@ const defaultSettings = {
   maxConcurrentDownloads: 4,
   speedLimit: 0,
   speedLimitUnit: 'MB/s',
+  // Appearance
+  backgroundPath: '',
+  backgroundOffsetX: 50,
+  backgroundOffsetY: 50,
+  backgroundZoom: 110,
+  overlayOpacity: 0.6,
 };
 
 function loadSettings() {
@@ -84,6 +90,22 @@ ipcMain.handle('browse-directory', async (event, defaultPath) => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory'],
     defaultPath: defaultPath || os.homedir(),
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    return result.filePaths[0];
+  }
+  return null;
+});
+
+// Browse file (for images)
+ipcMain.handle('browse-file', async (event, { defaultPath, filters } = {}) => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    defaultPath: defaultPath || os.homedir(),
+    filters: filters || [{
+      name: 'Images',
+      extensions: ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp'],
+    }],
   });
   if (!result.canceled && result.filePaths.length > 0) {
     return result.filePaths[0];
@@ -193,24 +215,53 @@ ipcMain.handle('get-file-size', (event, filePath) => {
   return 0;
 });
 
-// Proton versions
+// Proton versions — from dawn.wine Gitea
 ipcMain.handle('get-proton-versions', async () => {
   try {
     const response = await axios.get(
-      'https://api.github.com/repos/dawn-winery/dwproton-mirror/releases',
+      'https://dawn.wine/api/v1/repos/dawn-winery/dwproton/releases?limit=20',
       { timeout: 10000 }
     );
-    return response.data.map(release => ({
-      version: release.name || release.tag_name,
-      date: release.published_at ? release.published_at.split('T')[0] : '',
-      size: release.assets[0]?.size
-        ? (release.assets[0].size / (1024 * 1024)).toFixed(1) + ' MB'
-        : 'N/A',
-      url: release.assets.find(a => a.name.endsWith('.tar.gz'))?.browser_download_url || '',
-    })).filter(p => p.url);
+    return response.data.map(release => {
+      const asset = release.assets.find(a =>
+        a.name.endsWith('.tar.xz') && !a.name.endsWith('.torrent')
+      );
+      if (!asset) return null;
+      return {
+        version: release.name || release.tag_name,
+        date: release.published_at ? release.published_at.split('T')[0] : '',
+        size: (asset.size / (1024 * 1024)).toFixed(1) + ' MB',
+        url: asset.browser_download_url,
+        assetName: asset.name,
+      };
+    }).filter(Boolean);
   } catch (error) {
     return [];
   }
+});
+
+// Extract proton tar.xz into target directory
+ipcMain.handle('extract-proton', async (event, { archivePath, destDir }) => {
+  const { spawn } = require('child_process');
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+    // tar -xJf archive.tar.xz -C destDir --strip-components=1
+    const tar = spawn('tar', ['-xJf', archivePath, '-C', destDir, '--strip-components=1']);
+    tar.stderr.on('data', (data) => {
+      event.sender.send('extract-progress', { status: 'extracting', message: data.toString().trim() });
+    });
+    tar.on('close', (code) => {
+      if (code === 0) {
+        // Delete archive after successful extract
+        try { fs.unlinkSync(archivePath); } catch (_) {}
+        event.sender.send('extract-progress', { status: 'done' });
+        resolve({ status: 'done' });
+      } else {
+        resolve({ status: 'error', code });
+      }
+    });
+    tar.on('error', (err) => resolve({ status: 'error', message: err.message }));
+  });
 });
 
 // Check if proton path exists
@@ -265,3 +316,11 @@ ipcMain.handle('launch-game', async (event, { gameDir, protonPath, args, envVars
 });
 
 ipcMain.on('open-external', (event, url) => shell.openExternal(url));
+
+// Window controls
+ipcMain.on('window-minimize', () => mainWindow?.minimize());
+ipcMain.on('window-maximize', () => {
+  if (mainWindow?.isMaximized()) mainWindow.unmaximize();
+  else mainWindow?.maximize();
+});
+ipcMain.on('window-close', () => mainWindow?.close());

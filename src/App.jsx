@@ -41,8 +41,12 @@ function SettingsModal({ onClose, settings, onSave }) {
   const [protonVersions, setProtonVersions] = useState([]);
   const [protonLoading, setProtonLoading] = useState(false);
   const [protonStatus, setProtonStatus] = useState('');
+  // { [version]: { phase: 'idle'|'downloading'|'extracting'|'done'|'error', progress: 0-100, msg: '' } }
+  const [pvState, setPvState] = useState({});
 
   const set = (key, val) => setLocal(prev => ({ ...prev, [key]: val }));
+  const setPv = (version, update) =>
+    setPvState(prev => ({ ...prev, [version]: { ...(prev[version] || {}), ...update } }));
 
   const fetchProton = async () => {
     setProtonLoading(true);
@@ -51,8 +55,9 @@ function SettingsModal({ onClose, settings, onSave }) {
     setProtonLoading(false);
   };
 
-  const checkProtonStatus = async () => {
-    const exists = await window.electron.checkProtonPath(local.protonPath);
+  const checkProtonStatus = async (path) => {
+    const target = path !== undefined ? path : local.protonPath;
+    const exists = await window.electron.checkProtonPath(target);
     setProtonStatus(exists ? 'found' : 'not_found');
   };
 
@@ -66,6 +71,54 @@ function SettingsModal({ onClose, settings, onSave }) {
   useEffect(() => {
     checkProtonStatus();
   }, [local.protonPath]);
+
+  // Listen for extract-progress events
+  useEffect(() => {
+    window.electron.onExtractProgress((data) => {
+      if (data.status === 'done') {
+        setPvState(prev => {
+          const extractingVer = Object.keys(prev).find(v => prev[v].phase === 'extracting');
+          if (extractingVer) {
+            return { ...prev, [extractingVer]: { phase: 'done', progress: 100, msg: 'Installed!' } };
+          }
+          return prev;
+        });
+        checkProtonStatus();
+      }
+    });
+  }, []);
+
+  const handleInstallProton = async (p) => {
+    const protonDir = local.protonPath || `${window.process?.env?.HOME || '/tmp'}/.local/share/llauncher/proton`;
+    const tmpArchive = protonDir + '.tar.xz';
+    set('protonPath', protonDir);
+    setPv(p.version, { phase: 'downloading', progress: 0, msg: '0%' });
+
+    // Listen to download progress
+    window.electron.onDownloadProgress((data) => {
+      if (data.totalBytes > 0) {
+        const pct = Math.min((data.downloadedBytes / data.totalBytes) * 100, 99);
+        setPv(p.version, { phase: 'downloading', progress: pct, msg: Math.round(pct) + '%' });
+      }
+    });
+
+    try {
+      const result = await window.electron.startDownload({
+        url: p.url,
+        savePath: tmpArchive,
+        startByte: 0,
+      });
+
+      if (result?.status === 'done') {
+        setPv(p.version, { phase: 'extracting', progress: 99, msg: '' });
+        await window.electron.extractProton({ archivePath: tmpArchive, destDir: protonDir });
+      } else {
+        setPv(p.version, { phase: 'error', progress: 0, msg: result?.error || 'Download failed' });
+      }
+    } catch (e) {
+      setPv(p.version, { phase: 'error', progress: 0, msg: e.message });
+    }
+  };
 
   const browse = async (key, current) => {
     const dir = await window.electron.browseDirectory(current);
@@ -204,28 +257,39 @@ function SettingsModal({ onClose, settings, onSave }) {
                       <span style={{ color: 'rgba(255,255,255,0.4)' }}>No versions found. Check your internet connection.</span>
                     </div>
                   )}
-                  {protonVersions.map((p, i) => (
-                    <div key={i} className="proton-version-item">
-                      <div className="pv-info">
-                        <span className="pv-name">{p.version}</span>
-                        <span className="pv-meta">{p.date} · {p.size}</span>
+                  {protonVersions.map((p, i) => {
+                    const st = pvState[p.version] || { phase: 'idle' };
+                    const isBusy = st.phase === 'downloading' || st.phase === 'extracting';
+                    return (
+                      <div key={i} className="proton-version-item">
+                        <div className="pv-info">
+                          <span className="pv-name">{p.version}</span>
+                          <span className="pv-meta">{p.date} · {p.size}</span>
+                          {isBusy && (
+                            <div className="pv-progress-wrap">
+                              <div className="pv-progress-bar">
+                                <div className="pv-progress-fill" style={{ width: (st.progress || 0) + '%' }} />
+                              </div>
+                              <span className="pv-progress-label">
+                                {st.phase === 'downloading' ? `Downloading ${st.msg}` : 'Extracting...'}
+                              </span>
+                            </div>
+                          )}
+                          {st.phase === 'done' && <span className="pv-status-ok">✓ Installed</span>}
+                          {st.phase === 'error' && <span className="pv-status-err">✗ {st.msg}</span>}
+                        </div>
+                        <button
+                          className="pv-download-btn"
+                          disabled={isBusy}
+                          onClick={() => handleInstallProton(p)}
+                        >
+                          {isBusy
+                            ? (st.phase === 'extracting' ? 'Extracting' : 'Downloading')
+                            : st.phase === 'done' ? 'Reinstall' : 'Install'}
+                        </button>
                       </div>
-                      <button
-                        className="pv-download-btn"
-                        onClick={() => {
-                          // Set proton path and trigger download
-                          const targetPath = local.protonPath || `/home/${process.env.USER || 'user'}/.local/share/llauncher/proton`;
-                          set('protonPath', targetPath);
-                          window.electron.startDownload({
-                            url: p.url,
-                            savePath: targetPath + '.tar.gz',
-                          });
-                        }}
-                      >
-                        Download
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>
@@ -531,7 +595,22 @@ export default function App() {
 
   return (
     <div className="launcher-container">
-      <div className="drag-region" />
+      {/* Custom Titlebar */}
+      <div className="titlebar">
+        <div className="titlebar-drag" />
+        <div className="window-controls no-drag">
+          <button className="wc-btn wc-minimize" onClick={() => window.electron.windowMinimize()} title="Minimize">
+            <span className="wc-icon">&#8722;</span>
+          </button>
+          <button className="wc-btn wc-maximize" onClick={() => window.electron.windowMaximize()} title="Maximize">
+            <span className="wc-icon">&#9744;</span>
+          </button>
+          <button className="wc-btn wc-close" onClick={() => window.electron.windowClose()} title="Close">
+            <span className="wc-icon">&#10005;</span>
+          </button>
+        </div>
+      </div>
+      <div className="launcher-body">
       <nav className="sidebar">
         <div className="logo-circle">AE</div>
         <div className="nav-items">
@@ -676,12 +755,13 @@ export default function App() {
           )}
         </AnimatePresence>
       </main>
+      </div>
 
       {/* Settings Modal */}
       <AnimatePresence>
-        {showSettings && settings && (
+        {showSettings && (
           <SettingsModal
-            settings={settings}
+            settings={settings || {}}
             onClose={() => setShowSettings(false)}
             onSave={handleSaveSettings}
           />
