@@ -558,8 +558,10 @@ export default function App() {
   
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
-  const [totalBytes, setTotalBytes] = useState(0);
+  const [totalBytes, setTotalBytes] = useState(0); // 91.81 GB
+  const [totalDownloadSize, setTotalDownloadSize] = useState(0); // ~41.72 GB
   const [activePart, setActivePart] = useState(0);
+  const [totalParts, setTotalParts] = useState(0);
 
   const progressListenerRef = useRef(false);
 
@@ -573,20 +575,32 @@ export default function App() {
         setGameInfo(info);
         setSettings(cfg);
         
-        let totalDlSize = 0;
+        const fullSize = parseInt(info?.pkg?.total_size || '0');
+        setTotalBytes(fullSize);
+
+        let dlSize = 0;
         if (info?.pkg?.packs) {
-          totalDlSize = info.pkg.packs.reduce((acc, p) => acc + parseInt(p.package_size || '0'), 0);
+          dlSize = info.pkg.packs.reduce((acc, p) => acc + parseInt(p.package_size || '0'), 0);
+          setTotalParts(info.pkg.packs.length);
         }
-        setTotalBytes(totalDlSize || parseInt(info?.pkg?.total_size || '0'));
+        setTotalDownloadSize(dlSize);
         
         // Initial progress check
         if (info?.pkg?.packs && cfg?.downloadDir) {
-          const initialBytes = await window.electron.getTotalDownloaded({
-            packs: info.pkg.packs,
-            downloadDir: cfg.downloadDir
-          });
+          const [initialBytes, completedCount] = await Promise.all([
+            window.electron.getTotalDownloaded({
+              packs: info.pkg.packs,
+              downloadDir: cfg.downloadDir
+            }),
+            window.electron.getCompletedPartsCount({
+              packs: info.pkg.packs,
+              downloadDir: cfg.downloadDir
+            })
+          ]);
           setDownloadedBytes(initialBytes);
-          if (initialBytes > 0 && initialBytes < totalDlSize) {
+          setActivePart(completedCount);
+
+          if (initialBytes > 0 && initialBytes < dlSize) {
             setIsPaused(true);
           }
         }
@@ -610,6 +624,7 @@ export default function App() {
         setDownloadedBytes(data.downloadedBytes || 0);
         setDownloadSpeed(data.speed || 0);
         setActivePart(data.partIndex || 0);
+        if (data.totalParts) setTotalParts(data.totalParts);
       });
       window.electron.onExtractProgress((data) => {
         if (data.status === 'extracting') {
@@ -712,7 +727,8 @@ export default function App() {
   };
 
   const progress = totalBytes > 0 ? Math.min((downloadedBytes / totalBytes) * 100, 100) : 0;
-  const isDownloadComplete = totalBytes > 0 && downloadedBytes >= totalBytes;
+  // Download is complete when we reach totalDownloadSize (~41GB)
+  const isDownloadComplete = totalDownloadSize > 0 && downloadedBytes >= totalDownloadSize;
 
   const fmtBytes = (b) => {
     if (b >= 1e9) return (b / 1e9).toFixed(2) + ' GB';
@@ -726,22 +742,16 @@ export default function App() {
     return bps.toFixed(0) + ' B/s';
   };
 
-  const gameSize = isInstalled
-    ? (parseInt(gameInfo?.pkg?.total_size || '0') / 1e9).toFixed(2) + ' GB'
-    : (totalBytes / 1e9).toFixed(2) + ' GB';
+  const gameSize = (totalBytes / 1e9).toFixed(2) + ' GB';
 
   const statusLabel = isInstalled
     ? 'Ready to play'
     : isExtracting
     ? `Extracting... ${extractMsg}`
     : isDownloading
-<<<<<<< HEAD
-    ? `Downloading`
+    ? `Downloading Part ${activePart + 1} / ${totalParts}`
     : isDownloadComplete
     ? 'Download complete'
-=======
-    ? `Downloading Part ${activePart + 1}/${gameInfo?.pkg?.packs?.length}`
->>>>>>> parent of 8c9baf4 (Update App.jsx)
     : isPaused
     ? 'Paused'
     : 'Ready to download';

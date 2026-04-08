@@ -222,62 +222,24 @@ ipcMain.handle('get-game-links', async () => {
 });
 
 // Download with speed limiting and proper resume
-<<<<<<< HEAD
 async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 0, speedLimitUnit = 'MB/s', partIndex, totalParts, onProgress, expectedSize }) {
   const maxRetries = 3;
   let retryCount = 0;
   const partLabel = `[Part ${partIndex + 1}/${totalParts}]`;
-=======
-async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 0, speedLimitUnit = 'MB/s', partIndex, totalParts, overallDownloaded, expectedSize }) {
-  // If we already have the full file, just return its size
+
+  // Quick check locally BEFORE any network request
   if (expectedSize && startByte >= expectedSize) {
+    console.log(`${partLabel} Local check: Already completed (Size: ${startByte}). Skipping network.`);
     return { downloadedBytes: startByte };
   }
->>>>>>> parent of f9d75c2 (fix: Consolidate multi-part download progress into a single bar)
 
   console.log(`${partLabel} Starting download. Target: ${savePath}, StartByte: ${startByte}, Expected: ${expectedSize}`);
 
-<<<<<<< HEAD
   while (retryCount <= maxRetries) {
     try {
+      // Re-check size inside retry loop in case it changed
       if (expectedSize && startByte >= expectedSize) {
-        console.log(`${partLabel} Already completed (Size: ${startByte}). Skipping.`);
         return { downloadedBytes: startByte };
-=======
-  try {
-    const response = await axios({
-      method: 'get',
-      url,
-      responseType: 'stream',
-      headers,
-      signal: downloadController.signal,
-      timeout: 30000,
-    });
-
-    const totalFromHeader = parseInt(response.headers['content-length'] || '0');
-    const writer = fs.createWriteStream(savePath, { flags: startByte > 0 ? 'a' : 'w' });
-
-    let partDownloaded = startByte;
-    let lastTime = Date.now();
-    let lastOverall = overallDownloaded;
-
-    response.data.on('data', (chunk) => {
-      partDownloaded += chunk.length;
-      const now = Date.now();
-      const elapsed = (now - lastTime) / 1000;
-
-      if (elapsed >= 0.5) {
-        const currentOverall = lastOverall + (partDownloaded - startByte);
-        const speed = (currentOverall - lastOverall) / elapsed;
-        event.sender.send('download-progress', {
-          downloadedBytes: currentOverall,
-          partIndex,
-          totalParts,
-          speed,
-        });
-        lastTime = now;
-        lastOverall = currentOverall;
->>>>>>> parent of f9d75c2 (fix: Consolidate multi-part download progress into a single bar)
       }
 
       const headers = {};
@@ -288,7 +250,6 @@ async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 
         console.log(`${partLabel} Starting from byte 0`);
       }
 
-<<<<<<< HEAD
       const response = await axios({
         method: 'get',
         url,
@@ -382,17 +343,6 @@ async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 
         startByte = fs.statSync(savePath).size;
         console.log(`${partLabel} Updated startByte from disk: ${startByte}`);
       }
-=======
-    return new Promise((resolve, reject) => {
-      writer.on('finish', () => resolve({ downloadedBytes: partDownloaded }));
-      writer.on('error', reject);
-      response.data.on('error', reject);
-    });
-  } catch (error) {
-    // If range is not satisfiable, it usually means we already have the whole file
-    if (error.response && error.response.status === 416) {
-      return { downloadedBytes: startByte };
->>>>>>> parent of f9d75c2 (fix: Consolidate multi-part download progress into a single bar)
     }
   }
 }
@@ -412,7 +362,6 @@ ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit,
     fs.mkdirSync(downloadDir, { recursive: true });
   }
 
-<<<<<<< HEAD
   const partSizes = packs.map((_, i) => {
     const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
     const size = fs.existsSync(savePath) ? fs.statSync(savePath).size : 0;
@@ -420,43 +369,31 @@ ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit,
     return size;
   });
 
-  const sendOverallProgress = (speed) => {
+  const sendOverallProgress = (speed, currentPartIndex) => {
     const totalDownloaded = partSizes.reduce((a, b) => a + b, 0);
     event.sender.send('download-progress', {
       downloadedBytes: totalDownloaded,
       speed,
+      partIndex: currentPartIndex,
+      totalParts: packs.length
     });
   };
-=======
-  let overallDownloaded = 0;
-  // Calculate already downloaded bytes from existing files
-  for (let i = 0; i < packs.length; i++) {
-    const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
-    if (fs.existsSync(savePath)) {
-      overallDownloaded += fs.statSync(savePath).size;
-    }
-  }
->>>>>>> parent of f9d75c2 (fix: Consolidate multi-part download progress into a single bar)
 
   try {
     for (let i = 0; i < packs.length; i++) {
       const pack = packs[i];
       const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
-<<<<<<< HEAD
 
       // Re-check size on disk for each part to ensure accurate resume
       const existingSize = fs.existsSync(savePath) ? fs.statSync(savePath).size : 0;
       partSizes[i] = existingSize;
 
       const expectedSize = parseInt(pack.package_size || '0');
+      
+      // Update UI that we are starting/checking this part
+      sendOverallProgress(0, i);
 
       await downloadPart(event, {
-=======
-      const existingSize = fs.existsSync(savePath) ? fs.statSync(savePath).size : 0;
-      const expectedSize = parseInt(pack.size || '0');
-      
-      const result = await downloadPart(event, {
->>>>>>> parent of f9d75c2 (fix: Consolidate multi-part download progress into a single bar)
         url: pack.url,
         savePath,
         startByte: existingSize,
@@ -464,16 +401,12 @@ ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit,
         speedLimitUnit,
         partIndex: i,
         totalParts: packs.length,
-        overallDownloaded,
-        expectedSize
+        expectedSize,
+        onProgress: (currentPartSize, speed) => {
+          partSizes[i] = currentPartSize;
+          sendOverallProgress(speed, i);
+        }
       });
-      
-      // Update overallDownloaded with the actual bytes on disk after this part's attempt
-      if (fs.existsSync(savePath)) {
-        const finalPartSize = fs.statSync(savePath).size;
-        // The difference between what we had before starting this part and what we have now
-        overallDownloaded += (finalPartSize - existingSize);
-      }
     }
     console.log('--- DOWNLOAD TASK COMPLETED SUCCESSFULLY ---');
     downloadController = null;
