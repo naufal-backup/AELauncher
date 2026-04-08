@@ -685,7 +685,7 @@ export default function App() {
   const statusLabel = isExtracting
     ? `Extracting...`
     : isDownloading
-    ? `Downloading Part ${activePart + 1}/${gameInfo?.pkg?.packs?.length}`
+    ? `Downloading`
     : isPaused
     ? 'Paused'
     : 'Ready to download';
