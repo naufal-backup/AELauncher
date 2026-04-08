@@ -553,6 +553,7 @@ export default function App() {
   const [isDownloading, setIsDownloading] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
+  const [isInstalled, setIsInstalled] = useState(false);
   const [extractMsg, setExtractMsg] = useState('');
   
   const [downloadedBytes, setDownloadedBytes] = useState(0);
@@ -571,7 +572,30 @@ export default function App() {
         ]);
         setGameInfo(info);
         setSettings(cfg);
-        if (info?.pkg?.total_size) setTotalBytes(parseInt(info.pkg.total_size));
+        
+        let totalDlSize = 0;
+        if (info?.pkg?.packs) {
+          totalDlSize = info.pkg.packs.reduce((acc, p) => acc + parseInt(p.package_size || '0'), 0);
+        }
+        setTotalBytes(totalDlSize || parseInt(info?.pkg?.total_size || '0'));
+        
+        // Initial progress check
+        if (info?.pkg?.packs && cfg?.downloadDir) {
+          const initialBytes = await window.electron.getTotalDownloaded({
+            packs: info.pkg.packs,
+            downloadDir: cfg.downloadDir
+          });
+          setDownloadedBytes(initialBytes);
+          if (initialBytes > 0 && initialBytes < totalDlSize) {
+            setIsPaused(true);
+          }
+        }
+
+        // Check if installed
+        if (cfg?.gameDir) {
+          const installed = await window.electron.checkGameInstalled(cfg.gameDir);
+          setIsInstalled(installed);
+        }
       } catch (e) {
         console.error(e);
       } finally {
@@ -616,17 +640,40 @@ export default function App() {
       setIsDownloading(false);
 
       if (result?.status === 'done') {
-        // Start extraction
-        setIsExtracting(true);
-        await window.electron.extractGame({
-          downloadDir: settings.downloadDir,
-          gameDir: settings.gameDir
-        });
-        setIsExtracting(false);
+        // Automatically start extraction after download
+        await handleExtract();
+      } else if (result?.status === 'cancelled') {
+        setIsPaused(true);
+      } else if (result?.error) {
+        console.error('Download error:', result.error);
+        setIsPaused(true);
       }
     } catch (e) {
       console.error(e);
       setIsDownloading(false);
+      setIsExtracting(false);
+      setIsPaused(true);
+    }
+  };
+
+  const handleExtract = async () => {
+    if (!settings?.downloadDir || !settings?.gameDir) return;
+    
+    setIsExtracting(true);
+    try {
+      const result = await window.electron.extractGame({
+        downloadDir: settings.downloadDir,
+        gameDir: settings.gameDir
+      });
+      
+      if (result?.status === 'done') {
+        setIsInstalled(true);
+      } else if (result?.status === 'error') {
+        console.error('Extraction error:', result.message);
+      }
+    } catch (e) {
+      console.error('Extraction failed:', e);
+    } finally {
       setIsExtracting(false);
     }
   };
@@ -665,6 +712,7 @@ export default function App() {
   };
 
   const progress = totalBytes > 0 ? Math.min((downloadedBytes / totalBytes) * 100, 100) : 0;
+  const isDownloadComplete = totalBytes > 0 && downloadedBytes >= totalBytes;
 
   const fmtBytes = (b) => {
     if (b >= 1e9) return (b / 1e9).toFixed(2) + ' GB';
@@ -678,14 +726,18 @@ export default function App() {
     return bps.toFixed(0) + ' B/s';
   };
 
-  const gameSize = gameInfo?.pkg?.total_size
-    ? (parseInt(gameInfo.pkg.total_size) / 1e9).toFixed(2) + ' GB'
-    : '—';
+  const gameSize = isInstalled
+    ? (parseInt(gameInfo?.pkg?.total_size || '0') / 1e9).toFixed(2) + ' GB'
+    : (totalBytes / 1e9).toFixed(2) + ' GB';
 
-  const statusLabel = isExtracting
-    ? `Extracting...`
+  const statusLabel = isInstalled
+    ? 'Ready to play'
+    : isExtracting
+    ? `Extracting... ${extractMsg}`
     : isDownloading
     ? `Downloading`
+    : isDownloadComplete
+    ? 'Download complete'
     : isPaused
     ? 'Paused'
     : 'Ready to download';
@@ -762,42 +814,63 @@ export default function App() {
                     </div>
 
                     <div className="btn-group">
-                      {!isDownloading ? (
+                      {isInstalled ? (
+                        <button className="main-btn no-drag" onClick={handleLaunch}>
+                          <Play size={20} />
+                          <span>Play</span>
+                        </button>
+                      ) : isExtracting ? (
+                        <button className="main-btn no-drag disabled" disabled>
+                          <RotateCcw className="spin" size={20} />
+                          <span>Extracting</span>
+                        </button>
+                      ) : isDownloading ? (
+                        <button className="main-btn pause-btn no-drag" onClick={handlePause}>
+                          <Pause size={20} />
+                          <span>Pause</span>
+                        </button>
+                      ) : isDownloadComplete ? (
+                        <button className="main-btn no-drag" onClick={handleExtract}>
+                          <RotateCcw size={20} />
+                          <span>Extract</span>
+                        </button>
+                      ) : (
                         <>
                           <button className="main-btn no-drag" onClick={handleDownload}>
                             {isPaused ? <RotateCcw size={20} /> : <Download size={20} />}
                             <span>{isPaused ? 'Resume' : 'Download'}</span>
                           </button>
                           {isPaused || downloadedBytes > 0 ? null : (
-                            <button className="launch-btn no-drag" onClick={handleLaunch} title="Launch Game">
+                            <button className="launch-btn no-drag" onClick={handleLaunch} title="Launch Game (Direct)">
                               <Play size={20} />
                             </button>
                           )}
                         </>
-                      ) : (
-                        <button className="main-btn pause-btn no-drag" onClick={handlePause}>
-                          <Pause size={20} />
-                          <span>Pause</span>
-                        </button>
                       )}
                     </div>
                   </div>
 
-                  {(isDownloading || isPaused || downloadedBytes > 0) && (
+                  {(isDownloading || isPaused || downloadedBytes > 0 || isExtracting) && !isInstalled && (
                     <div className="progress-container">
                       <div className="progress-bar-bg">
                         <motion.div
                           className="progress-fill"
-                          style={{ width: progress + '%' }}
+                          style={{ width: (isExtracting ? 100 : progress) + '%' }}
                           initial={false}
-                          animate={{ width: progress + '%' }}
+                          animate={{ width: (isExtracting ? 100 : progress) + '%' }}
                           transition={{ ease: 'linear', duration: 0.3 }}
                         />
                       </div>
                       <div className="progress-stats">
-                        <span>{progress.toFixed(1)}%</span>
-                        <span>{fmtBytes(downloadedBytes)} / {fmtBytes(totalBytes)}</span>
-                        {isDownloading && <span>{fmtSpeed(downloadSpeed)}</span>}
+                        {isExtracting ? (
+                          <span>{extractMsg}</span>
+                        ) : (
+                          <>
+                            <span>{progress.toFixed(1)}%</span>
+                            <span>{fmtBytes(downloadedBytes)} / {fmtBytes(totalBytes)}</span>
+                            {isDownloading && <span>{fmtSpeed(downloadSpeed)}</span>}
+                          </>
+                        )}
                       </div>
                     </div>
                   )}

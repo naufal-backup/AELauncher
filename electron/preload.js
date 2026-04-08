@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('electron', {
   pauseDownload: () => ipcRenderer.invoke('pause-download'),
   extractGame: (args) => ipcRenderer.invoke('extract-game', args),
   getFileSize: (filePath) => ipcRenderer.invoke('get-file-size', filePath),
+  getTotalDownloaded: (args) => ipcRenderer.invoke('get-total-downloaded', args),
   onDownloadProgress: (callback) =>
     ipcRenderer.on('download-progress', (event, data) => callback(data)),
   removeDownloadProgress: () =>
@@ -34,6 +35,7 @@ contextBridge.exposeInMainWorld('electron', {
   browseFile: (opts) => ipcRenderer.invoke('browse-file', opts),
 
   // Launch
+  checkGameInstalled: (gameDir) => ipcRenderer.invoke('check-game-installed', gameDir),
   launchGame: (opts) => ipcRenderer.invoke('launch-game', opts),
 
   // Misc

@@ -223,72 +223,144 @@ ipcMain.handle('get-game-links', async () => {
 
 // Download with speed limiting and proper resume
 async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 0, speedLimitUnit = 'MB/s', partIndex, totalParts, onProgress, expectedSize }) {
-  // If we already have the full file, just return its size
-  if (expectedSize && startByte >= expectedSize) {
-    return { downloadedBytes: startByte };
-  }
+  const maxRetries = 3;
+  let retryCount = 0;
+  const partLabel = `[Part ${partIndex + 1}/${totalParts}]`;
 
-  const headers = {};
-  if (startByte > 0) headers['Range'] = `bytes=${startByte}-`;
+  console.log(`${partLabel} Starting download. Target: ${savePath}, StartByte: ${startByte}, Expected: ${expectedSize}`);
 
-  try {
-    const response = await axios({
-      method: 'get',
-      url,
-      responseType: 'stream',
-      headers,
-      signal: downloadController.signal,
-      timeout: 30000,
-    });
-
-    const writer = fs.createWriteStream(savePath, { flags: startByte > 0 ? 'a' : 'w' });
-
-    let partDownloaded = startByte;
-    let lastTime = Date.now();
-    let lastBytes = startByte;
-
-    response.data.on('data', (chunk) => {
-      partDownloaded += chunk.length;
-      const now = Date.now();
-      const elapsed = (now - lastTime) / 1000;
-
-      if (elapsed >= 0.5) {
-        const speed = (partDownloaded - lastBytes) / elapsed;
-        onProgress(partDownloaded, speed);
-        lastTime = now;
-        lastBytes = partDownloaded;
+  while (retryCount <= maxRetries) {
+    try {
+      if (expectedSize && startByte >= expectedSize) {
+        console.log(`${partLabel} Already completed (Size: ${startByte}). Skipping.`);
+        return { downloadedBytes: startByte };
       }
-    });
 
-    response.data.pipe(writer);
+      const headers = {};
+      if (startByte > 0) {
+        headers['Range'] = `bytes=${startByte}-`;
+        console.log(`${partLabel} Requesting range: ${headers['Range']}`);
+      } else {
+        console.log(`${partLabel} Starting from byte 0`);
+      }
 
-    return new Promise((resolve, reject) => {
-      writer.on('finish', () => {
-        onProgress(partDownloaded, 0);
-        resolve({ downloadedBytes: partDownloaded });
+      const response = await axios({
+        method: 'get',
+        url,
+        responseType: 'stream',
+        headers,
+        signal: downloadController?.signal,
+        timeout: 60000,
       });
-      writer.on('error', reject);
-      response.data.on('error', reject);
-    });
-  } catch (error) {
-    // If range is not satisfiable, it usually means we already have the whole file
-    if (error.response && error.response.status === 416) {
-      return { downloadedBytes: startByte };
+
+      console.log(`${partLabel} Server response: ${response.status} ${response.statusText}`);
+      
+      // Check if resume was successful or if we're starting over
+      const actualStartByte = (response.status === 206) ? startByte : 0;
+      if (startByte > 0 && response.status !== 206) {
+        console.warn(`${partLabel} Server did not return 206 Partial Content (Status: ${response.status}). Restarting part from 0 to prevent corruption.`);
+      }
+
+      const writer = fs.createWriteStream(savePath, { flags: actualStartByte > 0 ? 'a' : 'w' });
+      console.log(`${partLabel} Writing to disk with flags: ${actualStartByte > 0 ? "'a' (append)" : "'w' (overwrite)"}`);
+
+      let partDownloaded = actualStartByte;
+      let lastTime = Date.now();
+      let lastBytes = actualStartByte;
+
+      response.data.on('data', (chunk) => {
+        partDownloaded += chunk.length;
+        const now = Date.now();
+        const elapsed = (now - lastTime) / 1000;
+
+        if (elapsed >= 0.5) {
+          const speed = (partDownloaded - lastBytes) / elapsed;
+          onProgress(partDownloaded, speed);
+          lastTime = now;
+          lastBytes = partDownloaded;
+        }
+      });
+
+      return await new Promise((resolve, reject) => {
+        writer.on('finish', () => {
+          console.log(`${partLabel} Finished writing to disk. Final size: ${partDownloaded}`);
+          onProgress(partDownloaded, 0);
+          resolve({ downloadedBytes: partDownloaded });
+        });
+        
+        writer.on('error', (err) => {
+          console.error(`${partLabel} Stream writer error:`, err.message);
+          writer.close();
+          reject(err);
+        });
+
+        response.data.on('error', (err) => {
+          console.error(`${partLabel} Response data stream error:`, err.message);
+          writer.close();
+          reject(err);
+        });
+
+        if (downloadController) {
+          downloadController.signal.addEventListener('abort', () => {
+            console.log(`${partLabel} Abort signal received.`);
+            writer.close();
+            reject(new Error('Aborted'));
+          }, { once: true });
+        }
+      });
+    } catch (error) {
+      const isCancel = axios.isCancel(error) || error.name === 'CanceledError' || error.code === 'ERR_CANCELED' || error.message === 'Aborted';
+      if (isCancel) {
+        console.log(`${partLabel} Download cancelled by user or new download started.`);
+        throw error;
+      }
+
+      if (error.response && error.response.status === 416) {
+        console.log(`${partLabel} Range Not Satisfiable (416). Assuming file is already complete.`);
+        return { downloadedBytes: startByte };
+      }
+
+      console.error(`${partLabel} Error occurred:`, error.message);
+      if (error.code) console.error(`${partLabel} Error code: ${error.code}`);
+
+      retryCount++;
+      if (retryCount > maxRetries) {
+        console.error(`${partLabel} Max retries reached (${maxRetries}). Failing.`);
+        throw error;
+      }
+      
+      const delay = 2000 * retryCount;
+      console.log(`${partLabel} Retrying in ${delay}ms... (Attempt ${retryCount}/${maxRetries})`);
+      await new Promise(r => setTimeout(r, delay));
+      
+      if (fs.existsSync(savePath)) {
+        startByte = fs.statSync(savePath).size;
+        console.log(`${partLabel} Updated startByte from disk: ${startByte}`);
+      }
     }
-    throw error;
   }
 }
 
 ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit, speedLimitUnit }) => {
-  if (downloadController) downloadController.abort();
+  console.log('--- START DOWNLOAD TASK ---');
+  console.log(`Packs: ${packs.length}, Directory: ${downloadDir}`);
+
+  if (downloadController) {
+    console.log('Aborting previous download controller...');
+    downloadController.abort();
+  }
   downloadController = new AbortController();
 
-  if (!fs.existsSync(downloadDir)) fs.mkdirSync(downloadDir, { recursive: true });
+  if (!fs.existsSync(downloadDir)) {
+    console.log(`Creating download directory: ${downloadDir}`);
+    fs.mkdirSync(downloadDir, { recursive: true });
+  }
 
-  // Initialize part sizes from disk
   const partSizes = packs.map((_, i) => {
     const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
-    return fs.existsSync(savePath) ? fs.statSync(savePath).size : 0;
+    const size = fs.existsSync(savePath) ? fs.statSync(savePath).size : 0;
+    if (size > 0) console.log(`Found existing part ${i+1}: ${size} bytes`);
+    return size;
   });
 
   const sendOverallProgress = (speed) => {
@@ -303,9 +375,13 @@ ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit,
     for (let i = 0; i < packs.length; i++) {
       const pack = packs[i];
       const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
-      const existingSize = partSizes[i];
-      const expectedSize = parseInt(pack.size || '0');
-      
+
+      // Re-check size on disk for each part to ensure accurate resume
+      const existingSize = fs.existsSync(savePath) ? fs.statSync(savePath).size : 0;
+      partSizes[i] = existingSize;
+
+      const expectedSize = parseInt(pack.package_size || '0');
+
       await downloadPart(event, {
         url: pack.url,
         savePath,
@@ -321,11 +397,17 @@ ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit,
         }
       });
     }
+    console.log('--- DOWNLOAD TASK COMPLETED SUCCESSFULLY ---');
+    downloadController = null;
     return { status: 'done' };
   } catch (error) {
-    if (axios.isCancel(error) || error.name === 'CanceledError' || error.code === 'ERR_CANCELED') {
+    const isCancel = axios.isCancel(error) || error.name === 'CanceledError' || error.code === 'ERR_CANCELED' || error.message === 'Aborted';
+    if (isCancel) {
+      console.log('--- DOWNLOAD TASK CANCELLED ---');
       return { status: 'cancelled' };
     }
+    console.error('--- DOWNLOAD TASK FAILED ---');
+    console.error('Error Details:', error.message);
     return { error: error.message };
   }
 });
@@ -392,6 +474,23 @@ ipcMain.handle('get-file-size', (event, filePath) => {
   return 0;
 });
 
+// Get total downloaded bytes from disk
+ipcMain.handle('get-total-downloaded', (event, { packs, downloadDir }) => {
+  try {
+    if (!packs || !downloadDir) return 0;
+    let total = 0;
+    for (let i = 0; i < packs.length; i++) {
+      const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
+      if (fs.existsSync(savePath)) {
+        total += fs.statSync(savePath).size;
+      }
+    }
+    return total;
+  } catch (e) {
+    return 0;
+  }
+});
+
 // Proton versions — from dawn.wine Gitea
 ipcMain.handle('get-proton-versions', async () => {
   try {
@@ -444,6 +543,17 @@ ipcMain.handle('extract-proton', async (event, { archivePath, destDir }) => {
 // Check if proton path exists
 ipcMain.handle('check-proton-path', (event, protonPath) => {
   return fs.existsSync(protonPath);
+});
+
+// Check if game is installed
+ipcMain.handle('check-game-installed', (event, gameDir) => {
+  if (!gameDir) return false;
+  try {
+    const exePath = path.join(gameDir, 'Endfield.exe');
+    return fs.existsSync(exePath);
+  } catch (e) {
+    return false;
+  }
 });
 
 // Launch game
