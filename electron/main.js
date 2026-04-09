@@ -553,43 +553,40 @@ ipcMain.handle('check-proton-path', (event, protonPath) => utils.checkProtonPath
 ipcMain.handle('check-game-installed', (event, gameDir) => utils.checkGameInstalled(gameDir));
 
 // Launch game
-ipcMain.handle('launch-game', async (event, { gameDir, protonPath, args, envVars, nativeVulkan, wayland, gameMode, dxvkAsync, disableFsync, disableEsync, mangoHud, canonicalHole, customEnvVars }) => {
-  const { spawn } = require('child_process');
-
-  // Build environment
-  const env = { ...process.env };
-
-  if (wayland) env['PROTON_ENABLE_WAYLAND'] = '1';
-  if (dxvkAsync) env['DXVK_ASYNC'] = '1';
-  if (disableFsync) env['PROTON_NO_FSYNC'] = '1';
-  if (disableEsync) env['PROTON_NO_ESYNC'] = '1';
-  if (mangoHud) env['MANGOHUD'] = '1';
-  if (canonicalHole) env['WINE_CANONICAL_HOLE'] = 'skip_volatile_check';
-
-  // Parse custom env vars
-  if (customEnvVars) {
-    customEnvVars.split('\n').forEach(line => {
-      line = line.trim();
-      if (line && !line.startsWith('#') && line.includes('=')) {
-        const [k, ...v] = line.split('=');
-        env[k.trim()] = v.join('=').trim();
-      }
-    });
-  }
-
-  // Build command
-  let cmd = [];
-  if (gameMode) cmd.push('gamemoderun');
-
+ipcMain.handle('launch-game', async (event, { gameDir, protonPath, args, nativeVulkan, wayland, gameMode, dxvkAsync, disableFsync, disableEsync, mangoHud, canonicalHole, customEnvVars }) => {
   const exePath = path.join(gameDir, 'Endfield.exe');
 
-  if (protonPath && fs.existsSync(protonPath)) {
-    cmd.push(path.join(protonPath, 'proton'), 'run');
+  // Build env via utils
+  const env = utils.buildLaunchEnv({ wayland, dxvkAsync, disableFsync, disableEsync, mangoHud, canonicalHole, customEnvVars });
+
+  // Proton requires these two env vars
+  const compatDataPath = path.join(gameDir, 'pfx'); // Wine prefix directory
+  env['STEAM_COMPAT_DATA_PATH'] = compatDataPath;
+  env['STEAM_COMPAT_CLIENT_INSTALL_PATH'] = protonPath || '';
+
+  // Create prefix dir if needed
+  if (!fs.existsSync(compatDataPath)) fs.mkdirSync(compatDataPath, { recursive: true });
+
+  // Build command: [gamemoderun] [proton run] exe [-vulkan] [args...]
+  const cmd = [];
+  if (gameMode) cmd.push('gamemoderun');
+
+  const protonBin = protonPath && fs.existsSync(path.join(protonPath, 'proton'))
+    ? path.join(protonPath, 'proton')
+    : null;
+
+  if (protonBin) {
+    cmd.push(protonBin, 'run');
+  } else {
+    console.warn('[launch-game] protonPath not found, launching exe directly:', protonPath);
   }
 
   cmd.push(exePath);
   if (nativeVulkan) cmd.push('-vulkan');
   if (args) cmd.push(...args.split(' ').filter(Boolean));
+
+  console.log('[launch-game] Command:', cmd.join(' '));
+  console.log('[launch-game] STEAM_COMPAT_DATA_PATH:', compatDataPath);
 
   const [bin, ...binArgs] = cmd;
   const child = spawn(bin, binArgs, { env, cwd: gameDir, detached: true, stdio: 'ignore' });
@@ -597,6 +594,7 @@ ipcMain.handle('launch-game', async (event, { gameDir, protonPath, args, envVars
 
   return { status: 'launched', pid: child.pid };
 });
+
 
 ipcMain.on('open-external', (event, url) => shell.openExternal(url));
 
