@@ -107,7 +107,8 @@ function SettingsModal({ onClose, settings, onSave }) {
     });
 
     try {
-      const result = await window.electron.startDownload({
+      // Use downloadFile (single-file) instead of startDownload (multi-part game)
+      const result = await window.electron.downloadFile({
         url: p.url,
         savePath: tmpArchive,
         startByte: 0,

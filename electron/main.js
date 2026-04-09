@@ -399,6 +399,61 @@ ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit,
   }
 });
 
+// Single-file download (used by DWProton installer)
+ipcMain.handle('download-file', async (event, { url, savePath, startByte = 0 }) => {
+  console.log(`[download-file] ${url} → ${savePath} (startByte: ${startByte})`);
+
+  if (downloadController) downloadController.abort();
+  downloadController = new AbortController();
+
+  const dir = path.dirname(savePath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+  try {
+    const headers = {};
+    if (startByte > 0) headers['Range'] = `bytes=${startByte}-`;
+
+    const response = await axios.get(url, {
+      responseType: 'stream',
+      headers,
+      signal: downloadController.signal,
+    });
+
+    const totalFromHeader = parseInt(response.headers['content-length'] || '0');
+    const totalBytes = startByte + totalFromHeader;
+
+    const writer = fs.createWriteStream(savePath, { flags: startByte > 0 ? 'a' : 'w' });
+    let downloaded = startByte;
+    let lastReport = Date.now();
+    let lastBytes = startByte;
+
+    response.data.on('data', (chunk) => {
+      writer.write(chunk);
+      downloaded += chunk.length;
+      const now = Date.now();
+      if (now - lastReport >= 500) {
+        const speed = ((downloaded - lastBytes) / ((now - lastReport) / 1000));
+        event.sender.send('download-progress', { downloadedBytes: downloaded, totalBytes, speed });
+        lastBytes = downloaded;
+        lastReport = now;
+      }
+    });
+
+    await new Promise((resolve, reject) => {
+      response.data.on('end', () => { writer.end(); resolve(); });
+      response.data.on('error', reject);
+      writer.on('error', reject);
+    });
+
+    downloadController = null;
+    return { status: 'done' };
+  } catch (error) {
+    const isCancel = axios.isCancel(error) || error.name === 'CanceledError' || error.code === 'ERR_CANCELED';
+    if (isCancel) return { status: 'cancelled' };
+    return { error: error.message };
+  }
+});
+
 // Extract game parts (split ZIP — merge all parts then extract with 7z)
 ipcMain.handle('extract-game', async (event, { downloadDir, gameDir }) => {
   if (!fs.existsSync(gameDir)) fs.mkdirSync(gameDir, { recursive: true });

@@ -24,8 +24,7 @@ contextBridge.exposeInMainWorld('electron', {
   getProtonVersions: () => ipcRenderer.invoke('get-proton-versions'),
   checkProtonPath: (p) => ipcRenderer.invoke('check-proton-path', p),
   extractProton: (args) => ipcRenderer.invoke('extract-proton', args),
-  onExtractProgress: (callback) =>
-    ipcRenderer.on('extract-progress', (event, data) => callback(data)),
+  downloadFile: (args) => ipcRenderer.invoke('download-file', args),
 
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),
