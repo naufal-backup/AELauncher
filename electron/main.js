@@ -4,6 +4,7 @@ const axios = require('axios');
 const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
+const utils = require('./utils');
 
 let downloadController = null;
 let mainWindow = null;
@@ -42,23 +43,11 @@ const defaultSettings = {
 };
 
 function loadSettings() {
-  try {
-    if (fs.existsSync(settingsPath)) {
-      const data = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-      return { ...defaultSettings, ...data };
-    }
-  } catch (e) { console.error('Failed to load settings:', e); }
-  return { ...defaultSettings };
+  return utils.loadSettings(settingsPath, defaultSettings);
 }
 
 function saveSettings(settings) {
-  try {
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
-    return true;
-  } catch (e) {
-    console.error('Failed to save settings:', e);
-    return false;
-  }
+  return utils.saveSettings(settingsPath, settings);
 }
 
 function createTray() {
@@ -111,10 +100,34 @@ function createWindow() {
     },
   });
 
-  if (process.env.NODE_ENV === 'development' || !app.isPackaged) {
-    mainWindow.loadURL('http://localhost:5173');
+  // Try Vite dev server first, fallback to built dist
+  const devServerUrl = 'http://localhost:5173';
+  const distFile = path.join(__dirname, '../dist/index.html');
+
+  // ELECTRON_DEV=1 is set by "npm run electron" after wait-on confirms Vite is ready
+  if (process.env.ELECTRON_DEV === '1') {
+    console.log('Dev mode: loading from Vite dev server...');
+    mainWindow.loadURL(devServerUrl);
+  } else if (!app.isPackaged) {
+    // Standalone electron launch: check if Vite is running, else use dist
+    const tryLoadDevServer = () => new Promise((resolve) => {
+      const http = require('http');
+      const req = http.get(devServerUrl, () => { req.destroy(); resolve(true); });
+      req.on('error', () => resolve(false));
+      req.setTimeout(2000, () => { req.destroy(); resolve(false); });
+    });
+    tryLoadDevServer().then((devAvailable) => {
+      if (devAvailable) {
+        mainWindow.loadURL(devServerUrl);
+      } else if (fs.existsSync(distFile)) {
+        console.log('Dev server not running, loading from dist...');
+        mainWindow.loadFile(distFile);
+      } else {
+        mainWindow.loadURL('data:text/html,<h2>Build not found. Run: npm run dev</h2>');
+      }
+    });
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    mainWindow.loadFile(distFile);
   }
 
   mainWindow.on('close', (event) => {
@@ -232,7 +245,10 @@ async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 
       let lastTime = Date.now();
       let lastBytes = actualStartByte;
 
+      // Pipe stream to disk AND track progress
       response.data.on('data', (chunk) => {
+        // CRITICAL: actually write data to disk
+        writer.write(chunk);
         partDownloaded += chunk.length;
         const now = Date.now();
         const elapsed = (now - lastTime) / 1000;
@@ -244,6 +260,8 @@ async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 
           lastBytes = partDownloaded;
         }
       });
+
+      response.data.on('end', () => writer.end());
 
       return await new Promise((resolve, reject) => {
         writer.on('finish', () => {
@@ -384,43 +402,22 @@ ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit,
 // Extract game parts
 ipcMain.handle('extract-game', async (event, { downloadDir, gameDir }) => {
   if (!fs.existsSync(gameDir)) fs.mkdirSync(gameDir, { recursive: true });
-  
-  // We'll extract all .zip files in downloadDir to gameDir
-  // Using 7z if available, otherwise fallback or error
-  return new Promise((resolve, reject) => {
-    const parts = fs.readdirSync(downloadDir).filter(f => f.endsWith('.zip')).sort();
-    if (parts.length === 0) return reject(new Error('No zip files found to extract'));
 
-    // Extracting the first part of a multi-part zip usually handles the rest if they are named correctly
-    // But since these might be independent zips, we extract them one by one or as a set
-    
-    // For simplicity, let's extract them sequentially
-    let currentPart = 0;
-    
-    const extractNext = () => {
-      if (currentPart >= parts.length) {
-        return resolve({ status: 'done' });
-      }
-      
-      const partPath = path.join(downloadDir, parts[currentPart]);
-      event.sender.send('extract-progress', { status: 'extracting', message: `Extracting ${parts[currentPart]}...`, partIndex: currentPart, totalParts: parts.length });
-      
-      const unzip = spawn('unzip', ['-o', partPath, '-d', gameDir]);
-      
-      unzip.on('close', (code) => {
-        if (code === 0) {
-          currentPart++;
-          extractNext();
-        } else {
-          resolve({ status: 'error', message: `Unzip failed with code ${code} for ${parts[currentPart]}` });
-        }
-      });
-      
-      unzip.on('error', (err) => resolve({ status: 'error', message: err.message }));
-    };
+  const parts = utils.collectZipParts(downloadDir);
+  if (parts.length === 0) throw new Error('No zip files found to extract');
 
-    extractNext();
-  });
+  for (let i = 0; i < parts.length; i++) {
+    const partPath = path.join(downloadDir, parts[i]);
+    event.sender.send('extract-progress', {
+      status: 'extracting',
+      message: `Extracting ${parts[i]}...`,
+      partIndex: i,
+      totalParts: parts.length,
+    });
+    const result = await utils.extractZip(partPath, gameDir);
+    if (result.status !== 'done') return result;
+  }
+  return { status: 'done' };
 });
 
 
@@ -434,31 +431,17 @@ ipcMain.handle('pause-download', () => {
 });
 
 // Get file size for resume
-ipcMain.handle('get-file-size', (event, filePath) => {
-  try {
-    if (fs.existsSync(filePath)) {
-      return fs.statSync(filePath).size;
-    }
-  } catch (e) {}
-  return 0;
-});
+ipcMain.handle('get-file-size', (event, filePath) => utils.getFileSize(filePath));
+
+// Get how many parts are fully completed on disk
+ipcMain.handle('get-completed-parts-count', (event, { packs, downloadDir }) =>
+  utils.getCompletedPartsCount(packs, downloadDir)
+);
 
 // Get total downloaded bytes from disk
-ipcMain.handle('get-total-downloaded', (event, { packs, downloadDir }) => {
-  try {
-    if (!packs || !downloadDir) return 0;
-    let total = 0;
-    for (let i = 0; i < packs.length; i++) {
-      const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
-      if (fs.existsSync(savePath)) {
-        total += fs.statSync(savePath).size;
-      }
-    }
-    return total;
-  } catch (e) {
-    return 0;
-  }
-});
+ipcMain.handle('get-total-downloaded', (event, { packs, downloadDir }) =>
+  utils.getTotalDownloaded(packs, downloadDir)
+);
 
 // Proton versions — from dawn.wine Gitea
 ipcMain.handle('get-proton-versions', async () => {
@@ -487,43 +470,22 @@ ipcMain.handle('get-proton-versions', async () => {
 
 // Extract proton tar.xz into target directory
 ipcMain.handle('extract-proton', async (event, { archivePath, destDir }) => {
-  const { spawn } = require('child_process');
-  return new Promise((resolve, reject) => {
-    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
-    // tar -xJf archive.tar.xz -C destDir --strip-components=1
-    const tar = spawn('tar', ['-xJf', archivePath, '-C', destDir, '--strip-components=1']);
-    tar.stderr.on('data', (data) => {
-      event.sender.send('extract-progress', { status: 'extracting', message: data.toString().trim() });
-    });
-    tar.on('close', (code) => {
-      if (code === 0) {
-        // Delete archive after successful extract
-        try { fs.unlinkSync(archivePath); } catch (_) {}
-        event.sender.send('extract-progress', { status: 'done' });
-        resolve({ status: 'done' });
-      } else {
-        resolve({ status: 'error', code });
-      }
-    });
-    tar.on('error', (err) => resolve({ status: 'error', message: err.message }));
-  });
+  const result = await utils.extractProtonArchive(
+    archivePath,
+    destDir,
+    (msg) => event.sender.send('extract-progress', { status: 'extracting', message: msg })
+  );
+  if (result.status === 'done') {
+    event.sender.send('extract-progress', { status: 'done' });
+  }
+  return result;
 });
 
 // Check if proton path exists
-ipcMain.handle('check-proton-path', (event, protonPath) => {
-  return fs.existsSync(protonPath);
-});
+ipcMain.handle('check-proton-path', (event, protonPath) => utils.checkProtonPath(protonPath));
 
 // Check if game is installed
-ipcMain.handle('check-game-installed', (event, gameDir) => {
-  if (!gameDir) return false;
-  try {
-    const exePath = path.join(gameDir, 'Endfield.exe');
-    return fs.existsSync(exePath);
-  } catch (e) {
-    return false;
-  }
-});
+ipcMain.handle('check-game-installed', (event, gameDir) => utils.checkGameInstalled(gameDir));
 
 // Launch game
 ipcMain.handle('launch-game', async (event, { gameDir, protonPath, args, envVars, nativeVulkan, wayland, gameMode, dxvkAsync, disableFsync, disableEsync, mangoHud, canonicalHole, customEnvVars }) => {

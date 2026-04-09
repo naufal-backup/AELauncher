@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('electron', {
   extractGame: (args) => ipcRenderer.invoke('extract-game', args),
   getFileSize: (filePath) => ipcRenderer.invoke('get-file-size', filePath),
   getTotalDownloaded: (args) => ipcRenderer.invoke('get-total-downloaded', args),
+  getCompletedPartsCount: (args) => ipcRenderer.invoke('get-completed-parts-count', args),
   onDownloadProgress: (callback) =>
     ipcRenderer.on('download-progress', (event, data) => callback(data)),
   removeDownloadProgress: () =>
