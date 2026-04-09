@@ -40,6 +40,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create Release
+        id: create_release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.get_version.outputs.VERSION }}
@@ -55,16 +56,43 @@ jobs:
 
       - name: Cleanup Old Releases
         run: |
+          # The softprops/action-gh-release doesn't directly output release ID in v1 easily 
+          # so we identify the "current" one by its tag name and its recentness
           current_tag="${{ steps.get_version.outputs.VERSION }}"
-          echo "Current tag is $current_tag. Deleting others..."
           
-          # List all release tags
-          tags=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
+          # Wait a bit for GitHub to reflect the release creation/update
+          sleep 5
           
-          for tag in $tags; do
+          # List ALL releases (including drafts)
+          # We want to keep only the LATEST release for that tag (or just the latest release overall)
+          # Given the requirement: "menghapus semua rilis yang ada kecuali yang baru dirilis"
+          
+          # Get all release IDs sorted by creation (descending)
+          # We'll keep the top one (the one just created/updated) and delete others
+          ids=$(gh api repos/${{ github.repository }}/releases --jq 'sort_by(.created_at) | reverse | .[].id')
+          
+          # If we have multiple releases, the first one in the list is the one we just made
+          first=true
+          for id in $ids; do
+            if [ "$first" = true ]; then
+              echo "Keeping latest release ID: $id"
+              first=false
+            else
+              echo "Deleting old release ID: $id"
+              gh api -X DELETE repos/${{ github.repository }}/releases/$id || true
+            fi
+          done
+          
+          # Cleanup any orphaned tags that might have been left behind
+          # but keep the current version's tag
+          all_tags=$(gh api repos/${{ github.repository }}/git/matching-refs/tags --jq '.[].ref' | sed 's/refs\/tags\///')
+          for tag in $all_tags; do
             if [ "$tag" != "$current_tag" ]; then
-              echo "Deleting release and tag: $tag"
-              gh release delete "$tag" --yes --cleanup-tag || true
+              # If tag has no associated release, delete it
+              if ! gh release view "$tag" >/dev/null 2>&1; then
+                echo "Deleting orphaned tag: $tag"
+                gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/$tag || true
+              fi
             fi
           done
         env:
