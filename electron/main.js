@@ -62,44 +62,30 @@ function saveSettings(settings) {
 }
 
 function createTray() {
-  const iconPath = path.join(__dirname, 'icon.png');
-  console.log('Creating tray with icon:', iconPath);
-  if (!fs.existsSync(iconPath)) {
-    console.error('Tray icon not found at:', iconPath);
-    return;
-  }
+  const iconPath = path.join(__dirname, '../build/icon.png');
+  if (!fs.existsSync(iconPath)) return;
 
-  try {
-    tray = new Tray(iconPath);
-    const contextMenu = Menu.buildFromTemplate([
-      { label: 'Show AELauncher', click: () => {
-          mainWindow?.show();
-          mainWindow?.focus();
-        }
-      },
-      { type: 'separator' },
-      { label: 'Quit', click: () => {
-          isQuitting = true;
-          app.quit();
-        }
+  tray = new Tray(iconPath);
+  const contextMenu = Menu.buildFromTemplate([
+    { label: 'Show AELauncher', click: () => mainWindow?.show() },
+    { type: 'separator' },
+    { label: 'Quit', click: () => {
+        isQuitting = true;
+        app.quit();
       }
-    ]);
+    }
+  ]);
 
-    tray.setToolTip('AELauncher');
-    tray.setContextMenu(contextMenu);
+  tray.setToolTip('AELauncher');
+  tray.setContextMenu(contextMenu);
 
-    tray.on('click', () => {
-      if (mainWindow?.isVisible()) {
-        mainWindow.hide();
-      } else {
-        mainWindow?.show();
-        mainWindow?.focus();
-      }
-    });
-    console.log('Tray created successfully');
-  } catch (e) {
-    console.error('Failed to create tray:', e);
-  }
+  tray.on('click', () => {
+    if (mainWindow?.isVisible()) {
+      mainWindow.hide();
+    } else {
+      mainWindow?.show();
+    }
+  });
 }
 
 function createWindow() {
@@ -113,12 +99,11 @@ function createWindow() {
     }
   });
 
-  const iconPath = path.join(__dirname, 'icon.png');
   mainWindow = new BrowserWindow({
     width: 1200, height: 800, minWidth: 1000, minHeight: 700,
     titleBarStyle: 'hidden',
     backgroundColor: '#0f0f0f',
-    icon: iconPath,
+    icon: path.join(__dirname, '../build/icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -141,36 +126,9 @@ function createWindow() {
   });
 }
 
-const gotTheLock = app.requestSingleInstanceLock();
-
-if (!gotTheLock) {
-  app.quit();
-} else {
-  app.on('second-instance', (event, commandLine, workingDirectory) => {
-    // Someone tried to run a second instance, we should focus our window.
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      if (!mainWindow.isVisible()) mainWindow.show();
-      mainWindow.focus();
-    }
-  });
-
-  app.whenReady().then(() => {
-    createWindow();
-    createTray();
-  });
-}
-
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
-
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  }
+app.whenReady().then(() => {
+  createWindow();
+  createTray();
 });
 
 // Settings
