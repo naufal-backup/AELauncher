@@ -399,26 +399,36 @@ ipcMain.handle('start-download', async (event, { packs, downloadDir, speedLimit,
   }
 });
 
-// Extract game parts
+// Extract game parts (split ZIP — merge all parts then extract with 7z)
 ipcMain.handle('extract-game', async (event, { downloadDir, gameDir }) => {
   if (!fs.existsSync(gameDir)) fs.mkdirSync(gameDir, { recursive: true });
 
-  const parts = utils.collectZipParts(downloadDir);
-  if (parts.length === 0) throw new Error('No zip files found to extract');
+  // Sort parts numerically: Part_1, Part_2 ... Part_10, Part_11 ...
+  const partNames = utils.collectZipParts(downloadDir);
+  if (partNames.length === 0) return { status: 'error', message: 'No zip files found to extract' };
 
-  for (let i = 0; i < parts.length; i++) {
-    const partPath = path.join(downloadDir, parts[i]);
-    event.sender.send('extract-progress', {
-      status: 'extracting',
-      message: `Extracting ${parts[i]}...`,
-      partIndex: i,
-      totalParts: parts.length,
-    });
-    const result = await utils.extractZip(partPath, gameDir);
-    if (result.status !== 'done') return result;
-  }
-  return { status: 'done' };
+  const partPaths = partNames
+    .sort((a, b) => {
+      const numA = parseInt(a.match(/\d+/)?.[0] || '0');
+      const numB = parseInt(b.match(/\d+/)?.[0] || '0');
+      return numA - numB;
+    })
+    .map(name => path.join(downloadDir, name));
+
+  event.sender.send('extract-progress', {
+    status: 'extracting',
+    message: `Merging ${partPaths.length} parts...`,
+  });
+
+  const result = await utils.extractGameParts(
+    partPaths,
+    gameDir,
+    (msg) => event.sender.send('extract-progress', { status: 'extracting', message: msg })
+  );
+
+  return result;
 });
+
 
 
 ipcMain.handle('pause-download', () => {

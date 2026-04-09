@@ -182,26 +182,122 @@ function collectZipParts(downloadDir) {
 /**
  * Extract a single zip file to destDir using the system `unzip` binary.
  * Returns a Promise resolving to { status: 'done' | 'error', message? }.
+ * NOTE: Only use this for self-contained (non-split) zips.
  * @param {string} zipPath    - absolute path to .zip file
  * @param {string} destDir    - directory to extract into
- * @param {Function} [onProgress]  - called with (message) for each stderr line
+ * @param {Function} [onProgress]
  * @param {Function} spawnFn  - injectable spawn (default: child_process.spawn)
  * @returns {Promise<{status: string, message?: string, code?: number}>}
  */
 function extractZip(zipPath, destDir, onProgress, spawnFn) {
   const { spawn } = spawnFn ? { spawn: spawnFn } : require('child_process');
   return new Promise((resolve) => {
+    // Check file exists first
+    if (!fs.existsSync(zipPath)) {
+      return resolve({ status: 'error', message: `File not found: ${zipPath}` });
+    }
     const proc = spawn('unzip', ['-o', zipPath, '-d', destDir]);
-
+    let stderr = '';
+    proc.stderr?.on('data', (d) => { stderr += d.toString(); });
     proc.on('close', (code) => {
       if (code === 0) {
         resolve({ status: 'done' });
       } else {
-        resolve({ status: 'error', message: `unzip exited with code ${code}`, code });
+        resolve({ status: 'error', message: `unzip exited with code ${code}: ${stderr.trim()}`, code });
       }
     });
-
     proc.on('error', (err) => resolve({ status: 'error', message: err.message }));
+  });
+}
+
+/**
+ * Extract Arknights Endfield split-zip game parts.
+ *
+ * The launcher downloads the game as a single ZIP split across N files
+ * (Part_1.zip contains the local file headers, Part_N.zip contains EOCD).
+ * unzip cannot handle individual parts — they must be concatenated first,
+ * then extracted with 7z (which handles merged split-zips robustly).
+ *
+ * Strategy:
+ *   1. Sort parts numerically (Part_1, Part_2 … Part_N)
+ *   2. Merge into one temporary file using `cat`
+ *   3. Extract merged file with `7z x`
+ *   4. Delete temp file
+ *
+ * @param {string[]} partPaths   - Absolute paths, already sorted
+ * @param {string}   destDir     - Extraction destination
+ * @param {Function} [onProgress] - Called with progress string
+ * @returns {Promise<{status: string, message?: string}>}
+ */
+function extractGameParts(partPaths, destDir, onProgress) {
+  const { spawn } = require('child_process');
+
+  return new Promise((resolve) => {
+    if (!partPaths || partPaths.length === 0) {
+      return resolve({ status: 'error', message: 'No parts to extract' });
+    }
+
+    // Verify all parts exist
+    for (const p of partPaths) {
+      if (!fs.existsSync(p)) {
+        return resolve({ status: 'error', message: `Missing part: ${path.basename(p)}` });
+      }
+    }
+
+    if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+
+    const mergedPath = path.join(path.dirname(partPaths[0]), '_merged_game.zip');
+
+    // Step 1: Merge all parts into one file using cat
+    console.log(`[Extract] Merging ${partPaths.length} parts → ${mergedPath}`);
+    if (onProgress) onProgress(`Merging ${partPaths.length} parts...`);
+
+    const cat = spawn('cat', partPaths, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const writeStream = fs.createWriteStream(mergedPath);
+
+    cat.stdout.pipe(writeStream);
+
+    cat.on('error', (err) => {
+      resolve({ status: 'error', message: `cat error: ${err.message}` });
+    });
+
+    writeStream.on('finish', () => {
+      console.log('[Extract] Merge done, starting 7z extraction...');
+      if (onProgress) onProgress('Extracting...');
+
+      // Step 2: Extract merged zip with 7z
+      const sevenZ = spawn('7z', ['x', mergedPath, `-o${destDir}`, '-aoa', '-bsp1']);
+
+      sevenZ.stdout.on('data', (data) => {
+        const msg = data.toString().trim();
+        if (msg && onProgress) onProgress(msg);
+      });
+
+      sevenZ.stderr.on('data', (data) => {
+        console.error('[7z stderr]', data.toString().trim());
+      });
+
+      sevenZ.on('close', (code) => {
+        // Step 3: Clean up merged file
+        try { fs.unlinkSync(mergedPath); } catch (_) {}
+
+        if (code === 0) {
+          console.log('[Extract] Extraction complete.');
+          resolve({ status: 'done' });
+        } else {
+          resolve({ status: 'error', message: `7z exited with code ${code}` });
+        }
+      });
+
+      sevenZ.on('error', (err) => {
+        try { fs.unlinkSync(mergedPath); } catch (_) {}
+        resolve({ status: 'error', message: `7z not found: ${err.message}` });
+      });
+    });
+
+    writeStream.on('error', (err) => {
+      resolve({ status: 'error', message: `Write error: ${err.message}` });
+    });
   });
 }
 
@@ -285,6 +381,7 @@ module.exports = {
   isPartAlreadyComplete,
   collectZipParts,
   extractZip,
+  extractGameParts,
   extractProtonArchive,
   buildLaunchEnv,
 };
