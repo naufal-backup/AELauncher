@@ -4,11 +4,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*'
-  pull_request:
-    branches:
-      - main
 
 permissions:
   contents: write
@@ -27,6 +22,10 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
+      - name: Get Version
+        id: get_version
+        run: echo "VERSION=v$(jq -r .version package.json)" >> $GITHUB_OUTPUT
+
       - name: Install System Dependencies
         run: |
           sudo apt-get update
@@ -41,14 +40,32 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ steps.get_version.outputs.VERSION }}
+          name: Release ${{ steps.get_version.outputs.VERSION }}
           files: |
             dist_electron/*.AppImage
             dist_electron/*.deb
             dist_electron/*.pacman
           draft: false
           prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup Old Releases
+        run: |
+          current_tag="${{ steps.get_version.outputs.VERSION }}"
+          echo "Current tag is $current_tag. Deleting others..."
+          
+          # List all release tags
+          tags=$(gh release list --limit 100 --json tagName --jq '.[].tagName')
+          
+          for tag in $tags; do
+            if [ "$tag" != "$current_tag" ]; then
+              echo "Deleting release and tag: $tag"
+              gh release delete "$tag" --yes --cleanup-tag || true
+            fi
+          done
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
