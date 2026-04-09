@@ -554,7 +554,7 @@ export default function App() {
   const [isPaused, setIsPaused] = useState(false);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isInstalled, setIsInstalled] = useState(false);
-  const [extractMsg, setExtractMsg] = useState('');
+  const [extractPercent, setExtractPercent] = useState(0);
   
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
@@ -629,10 +629,15 @@ export default function App() {
       window.electron.onExtractProgress((data) => {
         if (data.status === 'extracting') {
           setIsExtracting(true);
-          setExtractMsg(data.message);
+          // Parse percentage from 7z output: "14%", "  14% 701 - file.dat"
+          const pct = data.percent ?? (() => {
+            const m = String(data.message || '').match(/(\d+)%/);
+            return m ? parseInt(m[1]) : null;
+          })();
+          if (pct !== null) setExtractPercent(pct);
         } else if (data.status === 'done') {
           setIsExtracting(false);
-          setExtractMsg('Done!');
+          setExtractPercent(100);
         }
       });
     }
@@ -726,7 +731,8 @@ export default function App() {
     await window.electron.saveSettings(newSettings);
   };
 
-  const progress = totalBytes > 0 ? Math.min((downloadedBytes / totalBytes) * 100, 100) : 0;
+  // Progress uses actual download size (~41 GB), not installed size (~91 GB)
+  const progress = totalDownloadSize > 0 ? Math.min((downloadedBytes / totalDownloadSize) * 100, 100) : 0;
   // Download is complete when we reach totalDownloadSize (~41GB)
   const isDownloadComplete = totalDownloadSize > 0 && downloadedBytes >= totalDownloadSize;
 
@@ -742,12 +748,15 @@ export default function App() {
     return bps.toFixed(0) + ' B/s';
   };
 
-  const gameSize = (totalBytes / 1e9).toFixed(2) + ' GB';
+  // Download size label: show actual download size, not installed size
+  const gameSize = totalDownloadSize > 0
+    ? (totalDownloadSize / 1e9).toFixed(2) + ' GB'
+    : (totalBytes / 1e9).toFixed(2) + ' GB';
 
   const statusLabel = isInstalled
     ? 'Ready to play'
     : isExtracting
-    ? `Extracting... ${extractMsg}`
+    ? `Extracting ${extractPercent}%`
     : isDownloading
     ? `Downloading Part ${activePart + 1} / ${totalParts}`
     : isDownloadComplete
@@ -869,19 +878,19 @@ export default function App() {
                       <div className="progress-bar-bg">
                         <motion.div
                           className="progress-fill"
-                          style={{ width: (isExtracting ? 100 : progress) + '%' }}
+                          style={{ width: (isExtracting ? extractPercent : progress) + '%' }}
                           initial={false}
-                          animate={{ width: (isExtracting ? 100 : progress) + '%' }}
+                          animate={{ width: (isExtracting ? extractPercent : progress) + '%' }}
                           transition={{ ease: 'linear', duration: 0.3 }}
                         />
                       </div>
                       <div className="progress-stats">
                         {isExtracting ? (
-                          <span>{extractMsg}</span>
+                          <span>Extracting {extractPercent}%</span>
                         ) : (
                           <>
                             <span>{progress.toFixed(1)}%</span>
-                            <span>{fmtBytes(downloadedBytes)} / {fmtBytes(totalBytes)}</span>
+                            <span>{fmtBytes(downloadedBytes)} / {fmtBytes(totalDownloadSize)}</span>
                             {isDownloading && <span>{fmtSpeed(downloadSpeed)}</span>}
                           </>
                         )}
