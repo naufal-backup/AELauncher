@@ -17,7 +17,7 @@ const defaultSettings = {
   gameDir: path.join(os.homedir(), 'Games', 'ArknightsEndfield'),
   downloadDir: path.join(os.homedir(), 'Games', 'ArknightsEndfield', '_download'),
   language: 'English',
-  protonPath: path.join(os.homedir(), '.local', 'share', 'llauncher', 'proton'),
+  protonPath: path.join(os.homedir(), '.local', 'share', 'aelauncher', 'proton'),
   launchAtStartup: false,
   minimizeToTray: true,
   afterGameLaunch: 'hide',
