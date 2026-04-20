@@ -286,6 +286,11 @@ async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 
   console.log(`${partLabel} Starting download. Target: ${savePath}, StartByte: ${startByte}, Expected: ${expectedSize}`);
 
   while (retryCount <= maxRetries) {
+    // CRITICAL: Check if already aborted before starting/retrying
+    if (downloadController?.signal.aborted) {
+      throw new Error('Aborted');
+    }
+
     try {
       // Re-check size inside retry loop in case it changed
       if (expectedSize && startByte >= expectedSize) {
@@ -295,108 +300,114 @@ async function downloadPart(event, { url, savePath, startByte = 0, speedLimit = 
       const headers = {};
       if (startByte > 0) {
         headers['Range'] = `bytes=${startByte}-`;
-        console.log(`${partLabel} Requesting range: ${headers['Range']}`);
-      } else {
-        console.log(`${partLabel} Starting from byte 0`);
       }
+
+      // Capture the current controller to ensure we use the same one throughout this attempt
+      const currentController = downloadController;
 
       const response = await axios({
         method: 'get',
         url,
         responseType: 'stream',
         headers,
-        signal: downloadController?.signal,
+        signal: currentController?.signal,
         timeout: 60000,
       });
 
-      console.log(`${partLabel} Server response: ${response.status} ${response.statusText}`);
+      console.log(`${partLabel} Server response: ${response.status}`);
       
-      // Check if resume was successful or if we're starting over
       const actualStartByte = (response.status === 206) ? startByte : 0;
-      if (startByte > 0 && response.status !== 206) {
-        console.warn(`${partLabel} Server did not return 206 Partial Content (Status: ${response.status}). Restarting part from 0 to prevent corruption.`);
-      }
-
       const writer = fs.createWriteStream(savePath, { flags: actualStartByte > 0 ? 'a' : 'w' });
-      console.log(`${partLabel} Writing to disk with flags: ${actualStartByte > 0 ? "'a' (append)" : "'w' (overwrite)"}`);
 
       let partDownloaded = actualStartByte;
       let lastTime = Date.now();
       let lastBytes = actualStartByte;
 
-      // Pipe stream to disk AND track progress
-      response.data.on('data', (chunk) => {
-        // CRITICAL: actually write data to disk
-        writer.write(chunk);
-        partDownloaded += chunk.length;
-        const now = Date.now();
-        const elapsed = (now - lastTime) / 1000;
-
-        if (elapsed >= 0.5) {
-          const speed = (partDownloaded - lastBytes) / elapsed;
-          onProgress(partDownloaded, speed);
-          lastTime = now;
-          lastBytes = partDownloaded;
-        }
-      });
-
-      response.data.on('end', () => writer.end());
-
       return await new Promise((resolve, reject) => {
+        const onAbort = () => {
+          console.log(`${partLabel} Abort signal received. Killing traffic...`);
+          
+          // Force destroy the request and the stream
+          if (response.request) response.request.destroy();
+          if (response.data) {
+            response.data.destroy();
+            if (response.data.socket) response.data.socket.destroy();
+          }
+          
+          writer.destroy();
+          reject(new Error('Aborted'));
+        };
+
+        if (currentController) {
+          currentController.signal.addEventListener('abort', onAbort, { once: true });
+        }
+
+        response.data.on('data', (chunk) => {
+          if (currentController?.signal.aborted) return;
+          writer.write(chunk);
+          partDownloaded += chunk.length;
+          const now = Date.now();
+          const elapsed = (now - lastTime) / 1000;
+
+          if (elapsed >= 0.5) {
+            const speed = (partDownloaded - lastBytes) / elapsed;
+            onProgress(partDownloaded, speed);
+            lastTime = now;
+            lastBytes = partDownloaded;
+          }
+        });
+
+        response.data.on('end', () => {
+          if (currentController) {
+            currentController.signal.removeEventListener('abort', onAbort);
+          }
+          writer.end();
+        });
+
         writer.on('finish', () => {
-          console.log(`${partLabel} Finished writing to disk. Final size: ${partDownloaded}`);
           onProgress(partDownloaded, 0);
           resolve({ downloadedBytes: partDownloaded });
         });
         
         writer.on('error', (err) => {
-          console.error(`${partLabel} Stream writer error:`, err.message);
+          if (currentController) currentController.signal.removeEventListener('abort', onAbort);
           writer.close();
           reject(err);
         });
 
         response.data.on('error', (err) => {
-          console.error(`${partLabel} Response data stream error:`, err.message);
+          if (currentController) currentController.signal.removeEventListener('abort', onAbort);
           writer.close();
           reject(err);
         });
-
-        if (downloadController) {
-          downloadController.signal.addEventListener('abort', () => {
-            console.log(`${partLabel} Abort signal received.`);
-            writer.close();
-            reject(new Error('Aborted'));
-          }, { once: true });
-        }
       });
     } catch (error) {
       const isCancel = axios.isCancel(error) || error.name === 'CanceledError' || error.code === 'ERR_CANCELED' || error.message === 'Aborted';
-      if (isCancel) {
-        console.log(`${partLabel} Download cancelled by user or new download started.`);
-        throw error;
+      if (isCancel || downloadController?.signal.aborted) {
+        throw new Error('Aborted');
       }
 
       if (error.response && error.response.status === 416) {
-        console.log(`${partLabel} Range Not Satisfiable (416). Assuming file is already complete.`);
         return { downloadedBytes: startByte };
       }
 
-      console.error(`${partLabel} Error occurred:`, error.message);
-      if (error.code) console.error(`${partLabel} Error code: ${error.code}`);
-
       retryCount++;
-      if (retryCount > maxRetries) {
-        console.error(`${partLabel} Max retries reached (${maxRetries}). Failing.`);
-        throw error;
-      }
+      if (retryCount > maxRetries) throw error;
       
       const delay = 2000 * retryCount;
       console.log(`${partLabel} Retrying in ${delay}ms... (Attempt ${retryCount}/${maxRetries})`);
-      await new Promise(r => setTimeout(r, delay));
+      
+      // Wait for delay, but allow it to be interrupted by abort
+      await new Promise(resolve => {
+        const timer = setTimeout(resolve, delay);
+        downloadController?.signal.addEventListener('abort', () => {
+          clearTimeout(timer);
+          resolve();
+        }, { once: true });
+      });
       
       if (fs.existsSync(savePath)) {
         startByte = fs.statSync(savePath).size;
-        console.log(`${partLabel} Updated startByte from disk: ${startByte}`);
       }
     }
   }
@@ -506,26 +517,44 @@ ipcMain.handle('download-file', async (event, { url, savePath, startByte = 0 }) 
     let lastReport = Date.now();
     let lastBytes = startByte;
 
-    response.data.on('data', (chunk) => {
-      writer.write(chunk);
-      downloaded += chunk.length;
-      const now = Date.now();
-      if (now - lastReport >= 500) {
-        const speed = ((downloaded - lastBytes) / ((now - lastReport) / 1000));
-        event.sender.send('download-progress', { downloadedBytes: downloaded, totalBytes, speed });
-        lastBytes = downloaded;
-        lastReport = now;
-      }
-    });
+    // Use the same robust abort logic
+    const currentController = downloadController;
 
-    await new Promise((resolve, reject) => {
-      response.data.on('end', () => { writer.end(); resolve(); });
-      response.data.on('error', reject);
+    return await new Promise((resolve, reject) => {
+      const onAbort = () => {
+        if (response.request) response.request.destroy();
+        if (response.data) {
+          response.data.destroy();
+          if (response.data.socket) response.data.socket.destroy();
+        }
+        writer.destroy();
+        reject(new Error('Aborted'));
+      };
+
+      currentController.signal.addEventListener('abort', onAbort, { once: true });
+
+      response.data.on('data', (chunk) => {
+        if (currentController.signal.aborted) return;
+        writer.write(chunk);
+        downloaded += chunk.length;
+        const now = Date.now();
+        if (now - lastReport >= 500) {
+          const speed = ((downloaded - lastBytes) / ((now - lastReport) / 1000));
+          event.sender.send('download-progress', { downloadedBytes: downloaded, totalBytes, speed });
+          lastBytes = downloaded;
+          lastReport = now;
+        }
+      });
+
+      response.data.on('end', () => {
+        currentController.signal.removeEventListener('abort', onAbort);
+        writer.end();
+      });
+
+      writer.on('finish', () => resolve({ status: 'done' }));
       writer.on('error', reject);
+      response.data.on('error', reject);
     });
-
-    downloadController = null;
-    return { status: 'done' };
   } catch (error) {
     const isCancel = axios.isCancel(error) || error.name === 'CanceledError' || error.code === 'ERR_CANCELED';
     if (isCancel) return { status: 'cancelled' };
@@ -568,7 +597,7 @@ ipcMain.handle('extract-game', async (event, { downloadDir, gameDir }) => {
 ipcMain.handle('pause-download', () => {
   if (downloadController) {
     downloadController.abort();
-    downloadController = null;
+    // Do not nullify here, let the download loop catch the abort
     return { status: 'paused' };
   }
   return { status: 'no_download' };

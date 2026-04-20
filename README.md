@@ -67,5 +67,18 @@ This project uses GitHub Actions to automate the build process. To trigger a new
    ```
 The workflow will automatically build the `AppImage`, `.deb`, and `.pacman` packages and upload them to a new GitHub Release.
 
-## 📄 License
-This project is private. See [package.json](package.json) for more details.
+## 🤝 Kontribusi
+
+Laporan bug dan Pull Request sangat kami hargai!
+
+## 💰 Support
+
+https://saweria.co/Naufal453
+
+## 📄 Lisensi
+
+Proyek ini dilisensikan di bawah **MIT License**.
+
+---
+
+**Developed by Naufal Gastiadirrijal Fawwaz Alamsyah**
