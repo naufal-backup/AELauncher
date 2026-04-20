@@ -211,18 +211,10 @@ function extractZip(zipPath, destDir, onProgress, spawnFn) {
 }
 
 /**
- * Extract Arknights Endfield split-zip game parts.
+ * Extract Arknights Endfield game parts.
  *
- * The launcher downloads the game as a single ZIP split across N files
- * (Part_1.zip contains the local file headers, Part_N.zip contains EOCD).
- * unzip cannot handle individual parts — they must be concatenated first,
- * then extracted with 7z (which handles merged split-zips robustly).
- *
- * Strategy:
- *   1. Sort parts numerically (Part_1, Part_2 … Part_N)
- *   2. Merge into one temporary file using `cat`
- *   3. Extract merged file with `7z x`
- *   4. Delete temp file
+ * The parts are individual ZIP archives that should be extracted 
+ * one by one into the same destination directory.
  *
  * @param {string[]} partPaths   - Absolute paths, already sorted
  * @param {string}   destDir     - Extraction destination
@@ -230,73 +222,87 @@ function extractZip(zipPath, destDir, onProgress, spawnFn) {
  * @returns {Promise<{status: string, message?: string}>}
  */
 function extractGameParts(partPaths, destDir, onProgress) {
-  const { spawn } = require('child_process');
+  const { spawn, execSync } = require('child_process');
+  const fs = require('fs');
+  const path = require('path');
 
-  return new Promise((resolve) => {
+  return new Promise(async (resolve) => {
     if (!partPaths || partPaths.length === 0) {
       return resolve({ status: 'error', message: 'No parts to extract' });
     }
 
-    // Verify all parts exist
-    for (const p of partPaths) {
-      if (!fs.existsSync(p)) {
-        return resolve({ status: 'error', message: `Missing part: ${path.basename(p)}` });
+    const sortedPaths = [...partPaths].sort((a, b) => {
+      const extractNum = (p) => {
+        const m = path.basename(p).match(/Part_(\d+)/i);
+        return m ? parseInt(m[1]) : 0;
+      };
+      return extractNum(a) - extractNum(b);
+    });
+
+    let binary = '7z';
+    try {
+      execSync('7z --help', { stdio: 'ignore' });
+    } catch (e) {
+      const { path7za } = require('7zip-bin');
+      binary = path7za;
+      if (binary.includes('app.asar') && !binary.includes('app.asar.unpacked')) {
+        binary = binary.replace('app.asar', 'app.asar.unpacked');
       }
+      try { fs.chmodSync(binary, 0o755); } catch (err) {}
     }
 
+    // --- STEP 1: MERGE ---
     if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true });
+    const downloadDir = path.dirname(sortedPaths[0]);
+    const mergedPath = path.join(downloadDir, '_merged_game.zip');
 
-    const mergedPath = path.join(path.dirname(partPaths[0]), '_merged_game.zip');
+    console.log(`[Extract] Merging ${sortedPaths.length} parts sequentially...`);
+    if (onProgress) onProgress(`Merging ${sortedPaths.length} parts...`);
 
-    // Step 1: Merge all parts into one file using cat
-    console.log(`[Extract] Merging ${partPaths.length} parts → ${mergedPath}`);
-    if (onProgress) onProgress(`Merging ${partPaths.length} parts...`);
+    try {
+      const writeStream = fs.createWriteStream(mergedPath);
+      for (let i = 0; i < sortedPaths.length; i++) {
+        if (onProgress) onProgress(`Merging parts (${i + 1}/${sortedPaths.length})...`);
+        const rs = fs.createReadStream(sortedPaths[i]);
+        await new Promise((res, rej) => {
+          rs.pipe(writeStream, { end: false });
+          rs.on('end', res);
+          rs.on('error', rej);
+        });
+      }
+      writeStream.end();
+      await new Promise(res => writeStream.on('finish', res));
+    } catch (err) {
+      return resolve({ status: 'error', message: `Merge failed: ${err.message}` });
+    }
 
-    const cat = spawn('cat', partPaths, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const writeStream = fs.createWriteStream(mergedPath);
+    // --- STEP 2: EXTRACT ---
+    console.log('[Extract] Merge complete. Starting extraction...');
+    if (onProgress) onProgress('Extracting game files (this will take a while)...');
+    
+    const sevenZ = spawn(binary, ['x', mergedPath, `-o${destDir}`, '-tzip', '-aoa', '-y', '-bsp1']);
+    let stderr = '';
 
-    cat.stdout.pipe(writeStream);
-
-    cat.on('error', (err) => {
-      resolve({ status: 'error', message: `cat error: ${err.message}` });
+    sevenZ.stderr.on('data', (data) => stderr += data.toString());
+    sevenZ.stdout.on('data', (data) => {
+      const msg = data.toString().trim();
+      if (msg && onProgress) onProgress(msg);
     });
 
-    writeStream.on('finish', () => {
-      console.log('[Extract] Merge done, starting 7z extraction...');
-      if (onProgress) onProgress('Extracting...');
-
-      // Step 2: Extract merged zip with 7z
-      const sevenZ = spawn('7z', ['x', mergedPath, `-o${destDir}`, '-aoa', '-bsp1']);
-
-      sevenZ.stdout.on('data', (data) => {
-        const msg = data.toString().trim();
-        if (msg && onProgress) onProgress(msg);
-      });
-
-      sevenZ.stderr.on('data', (data) => {
-        console.error('[7z stderr]', data.toString().trim());
-      });
-
-      sevenZ.on('close', (code) => {
-        // Step 3: Clean up merged file
-        try { fs.unlinkSync(mergedPath); } catch (_) {}
-
-        if (code === 0) {
-          console.log('[Extract] Extraction complete.');
-          resolve({ status: 'done' });
-        } else {
-          resolve({ status: 'error', message: `7z exited with code ${code}` });
-        }
-      });
-
-      sevenZ.on('error', (err) => {
-        try { fs.unlinkSync(mergedPath); } catch (_) {}
-        resolve({ status: 'error', message: `7z not found: ${err.message}` });
-      });
-    });
-
-    writeStream.on('error', (err) => {
-      resolve({ status: 'error', message: `Write error: ${err.message}` });
+    sevenZ.on('close', (code) => {
+      // Cleanup merged file to free up ~45GB
+      try { fs.unlinkSync(mergedPath); } catch (_) {}
+      
+      if (code === 0) {
+        console.log('[Extract] Success!');
+        resolve({ status: 'done' });
+      } else {
+        console.error('[Extract] 7z Failed:', stderr);
+        resolve({ 
+          status: 'error', 
+          message: `Extraction failed (Code ${code}).\n${stderr}\n\nJika masih muncul 'Data Error', kemungkinan ada part lain yang corrupt selain Part 1.` 
+        });
+      }
     });
   });
 }
@@ -429,6 +435,23 @@ async function findLatestBackground() {
   return null;
 }
 
+/**
+ * Calculate MD5 hash of a file.
+ * @param {string} filePath
+ * @returns {Promise<string>}
+ */
+function calculateMD5(filePath) {
+  const crypto = require('crypto');
+  const fs = require('fs');
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('md5');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (data) => hash.update(data));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', (err) => reject(err));
+  });
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -446,4 +469,5 @@ module.exports = {
   buildLaunchEnv,
   downloadImage,
   findLatestBackground,
+  calculateMD5,
 };

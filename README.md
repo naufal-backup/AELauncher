@@ -37,6 +37,7 @@ sudo pacman -U aelauncher-0.1.0.pacman
 ### Prerequisites
 - Node.js (v18 or higher)
 - npm
+- **p7zip-full** (required for game extraction)
 
 ### Setup
 1. Clone the repository:

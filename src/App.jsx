@@ -685,13 +685,16 @@ export default function App() {
   };
 
   const handleExtract = async () => {
-    if (!settings?.downloadDir || !settings?.gameDir) return;
+    if (!settings?.downloadDir || !settings?.gameDir || !gameInfo?.pkg?.packs) return;
 
     setIsExtracting(true);
     try {
       const result = await window.electron.extractGame({
         downloadDir: settings.downloadDir,
-        gameDir: settings.gameDir
+        gameDir: settings.gameDir,
+        packs: gameInfo.pkg.packs,
+        speedLimit: settings?.speedLimit || 0,
+        speedLimitUnit: settings?.speedLimitUnit || 'MB/s',
       });
 
       if (result?.status === 'done') {
@@ -904,8 +907,8 @@ export default function App() {
                         ) : (
                           <>
                             <button className="main-btn no-drag" onClick={handleDownload}>
-                              {isPaused ? <RotateCcw size={20} /> : <Download size={20} />}
-                              <span>{isPaused ? 'Resume' : 'Download'}</span>
+                              {isPaused || (downloadedBytes > 0 && downloadedBytes < totalDownloadSize) ? <RotateCcw size={20} /> : <Download size={20} />}
+                              <span>{isPaused || (downloadedBytes > 0 && downloadedBytes < totalDownloadSize) ? 'Resume' : 'Download'}</span>
                             </button>
                             {isPaused || downloadedBytes > 0 ? null : (
                               <button className="launch-btn no-drag" onClick={handleLaunch} title="Launch Game (Direct)">

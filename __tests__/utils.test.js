@@ -26,6 +26,7 @@ const {
   isPartAlreadyComplete,
   collectZipParts,
   extractZip,
+  extractGameParts,
   extractProtonArchive,
   buildLaunchEnv,
 } = require('../electron/utils');
@@ -561,6 +562,41 @@ describe('extractProtonArchive()', () => {
 
     const result = await extractProtonArchive(badArchive, destDir);
     expect(result.status).toBe('error');
+  });
+});
+
+// ─── extractGameParts() — integration ───────────────────────────────────────────
+
+describe('extractGameParts()', () => {
+  let tmpDir;
+
+  beforeEach(() => { tmpDir = makeTempDir(); });
+  afterEach(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+
+  test('returns error if no parts provided', async () => {
+    const result = await extractGameParts([], tmpDir);
+    expect(result.status).toBe('error');
+    expect(result.message).toBe('No parts to extract');
+  });
+
+  test('returns error if a part is missing', async () => {
+    const parts = [path.join(tmpDir, 'missing.zip')];
+    const result = await extractGameParts(parts, tmpDir);
+    expect(result.status).toBe('error');
+    expect(result.message).toContain('Missing part');
+  });
+
+  test('creates destDir if it does not exist', async () => {
+    // Mock the actual merge and extract by creating an empty zip part 
+    // Just testing the directory creation and subsequent fail/pass
+    const destDir = path.join(tmpDir, 'new_game_dir');
+    const partPath = path.join(tmpDir, 'Endfield_Part_1.zip');
+    fs.writeFileSync(partPath, 'fake-zip-data');
+
+    // This will fail at extraction step since it's a fake zip, 
+    // but the destDir should be created first.
+    await extractGameParts([partPath], destDir);
+    expect(fs.existsSync(destDir)).toBe(true);
   });
 });
 

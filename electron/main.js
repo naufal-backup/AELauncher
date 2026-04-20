@@ -563,31 +563,105 @@ ipcMain.handle('download-file', async (event, { url, savePath, startByte = 0 }) 
 });
 
 // Extract game parts (split ZIP — merge all parts then extract with 7z)
-ipcMain.handle('extract-game', async (event, { downloadDir, gameDir }) => {
+ipcMain.handle('extract-game', async (event, { downloadDir, gameDir, packs, speedLimit, speedLimitUnit }) => {
   if (!fs.existsSync(gameDir)) fs.mkdirSync(gameDir, { recursive: true });
 
-  // Sort parts numerically: Part_1, Part_2 ... Part_10, Part_11 ...
-  const partNames = utils.collectZipParts(downloadDir);
-  if (partNames.length === 0) return { status: 'error', message: 'No zip files found to extract' };
+  // --- STEP 1: AUTOMATIC INTEGRITY CHECK & RECOVERY ---
+  let allMatch = false;
+  while (!allMatch) {
+    allMatch = true;
+    for (let i = 0; i < packs.length; i++) {
+      const pack = packs[i];
+      const savePath = path.join(downloadDir, `Endfield_Part_${i + 1}.zip`);
+      
+      event.sender.send('extract-progress', {
+        status: 'extracting',
+        message: `Checking Part ${i + 1}/${packs.length}...`,
+      });
 
-  const partPaths = partNames
-    .sort((a, b) => {
-      const numA = parseInt(a.match(/\d+/)?.[0] || '0');
-      const numB = parseInt(b.match(/\d+/)?.[0] || '0');
-      return numA - numB;
-    })
-    .map(name => path.join(downloadDir, name));
+      const exists = fs.existsSync(savePath);
+      const sizeMatch = exists && fs.statSync(savePath).size >= parseInt(pack.package_size || '0');
+      
+      let needsRedownload = !exists || !sizeMatch;
 
+      // Only check MD5 if size matches to save time
+      if (!needsRedownload) {
+        const currentMd5 = await utils.calculateMD5(savePath);
+        if (currentMd5 !== pack.md5) {
+          console.warn(`MD5 Mismatch for Part ${i + 1}. Expected ${pack.md5}, got ${currentMd5}`);
+          needsRedownload = true;
+          try { fs.unlinkSync(savePath); } catch (e) {}
+        }
+      }
+
+      if (needsRedownload) {
+        allMatch = false;
+        console.log(`Part ${i + 1} is missing or corrupt. Redownloading...`);
+        event.sender.send('extract-progress', {
+          status: 'extracting',
+          message: `Redownloading Part ${i + 1}...`,
+        });
+
+        // Use existing downloadPart logic to recover this specific part
+        try {
+          if (!downloadController) downloadController = new AbortController();
+          await downloadPart(event, {
+            url: pack.url,
+            savePath,
+            startByte: 0,
+            speedLimit,
+            speedLimitUnit,
+            partIndex: i,
+            totalParts: packs.length,
+            expectedSize: parseInt(pack.package_size || '0'),
+            onProgress: (currentPartSize, speed) => {
+              event.sender.send('download-progress', {
+                downloadedBytes: utils.getTotalDownloaded(packs, downloadDir),
+                speed,
+                partIndex: i,
+                totalParts: packs.length
+              });
+            }
+          });
+        } catch (err) {
+          return { status: 'error', message: `Failed to recover Part ${i + 1}: ${err.message}` };
+        }
+        // Break inner loop to re-verify from the beginning or continue to next part
+      }
+    }
+  }
+
+  // --- STEP 2: PROCEED TO EXTRACTION ---
   event.sender.send('extract-progress', {
     status: 'extracting',
-    message: `Merging ${partPaths.length} parts...`,
+    message: 'All files verified. Merging...',
   });
+
+  const partNames = utils.collectZipParts(downloadDir);
+  const partPaths = partNames.map(name => path.join(downloadDir, name));
 
   const result = await utils.extractGameParts(
     partPaths,
     gameDir,
     (msg) => event.sender.send('extract-progress', { status: 'extracting', message: msg })
   );
+
+  // --- STEP 3: CLEANUP DOWNLOAD PARTS ON SUCCESS ---
+  if (result.status === 'done') {
+    console.log('[Extract] Extraction successful. Cleaning up download parts...');
+    event.sender.send('extract-progress', { status: 'extracting', message: 'Cleaning up...' });
+    
+    for (const partPath of partPaths) {
+      try {
+        if (fs.existsSync(partPath)) {
+          fs.unlinkSync(partPath);
+        }
+      } catch (e) {
+        console.error(`Failed to delete part ${partPath}:`, e.message);
+      }
+    }
+    console.log('[Extract] Cleanup complete.');
+  }
 
   return result;
 });
