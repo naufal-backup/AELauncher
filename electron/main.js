@@ -35,12 +35,61 @@ const defaultSettings = {
   speedLimit: 0,
   speedLimitUnit: 'MB/s',
   // Appearance
-  backgroundPath: path.join(os.homedir(), 'Downloads', 'kv_v1d1.3df4b429.jpg'),
+  backgroundPath: path.join(app.getPath('userData'), 'backgrounds', 'kv_v1d2.f352a0f9.jpg'),
   backgroundOffsetX: 50,
   backgroundOffsetY: 50,
   backgroundZoom: 100,
   overlayOpacity: 0.4,
 };
+
+const DEFAULT_BG_URL = 'https://web-static.hg-cdn.com/endfield/official-v4/_next/static/media/kv_v1d2.f352a0f9.jpg';
+
+async function checkAndUpdateBackground() {
+  const settings = loadSettings();
+  const bgDir = path.join(app.getPath('userData'), 'backgrounds');
+  
+  if (!fs.existsSync(bgDir)) fs.mkdirSync(bgDir, { recursive: true });
+
+  // 1. Ensure we have at least the default background
+  if (!fs.existsSync(settings.backgroundPath)) {
+    console.log('Default background missing, downloading...');
+    const ok = await utils.downloadImage(DEFAULT_BG_URL, settings.backgroundPath);
+    if (ok && mainWindow) {
+      mainWindow.webContents.send('settings-updated', loadSettings());
+    }
+  }
+
+  // 2. Check for updates from the official site
+  try {
+    const latestUrl = await utils.findLatestBackground();
+    if (latestUrl && !latestUrl.includes(path.basename(settings.backgroundPath))) {
+      console.log('New background detected:', latestUrl);
+      const newFilename = path.basename(latestUrl);
+      const newPath = path.join(bgDir, newFilename);
+
+      if (!fs.existsSync(newPath)) {
+        const ok = await utils.downloadImage(latestUrl, newPath);
+        if (ok) {
+          settings.backgroundPath = newPath;
+          saveSettings(settings);
+          console.log('Background auto-updated to:', newFilename);
+          if (mainWindow) {
+            mainWindow.webContents.send('settings-updated', settings);
+          }
+        }
+      } else {
+        // File exists but not set as current
+        settings.backgroundPath = newPath;
+        saveSettings(settings);
+        if (mainWindow) {
+          mainWindow.webContents.send('settings-updated', settings);
+        }
+      }
+    }
+  } catch (error) {
+    console.error('Auto-update background failed:', error.message);
+  }
+}
 
 function loadSettings() {
   return utils.loadSettings(settingsPath, defaultSettings);
@@ -51,30 +100,49 @@ function saveSettings(settings) {
 }
 
 function createTray() {
-  const iconPath = path.join(__dirname, '../build/icon.png');
-  if (!fs.existsSync(iconPath)) return;
+  let iconPath = path.join(__dirname, 'icon.png');
+  
+  // If packaged, use the unpacked version for better compatibility with Linux tray
+  if (app.isPackaged) {
+    iconPath = path.join(__dirname, 'icon.png').replace('app.asar', 'app.asar.unpacked');
+  }
 
-  tray = new Tray(iconPath);
-  const contextMenu = Menu.buildFromTemplate([
-    { label: 'Show AELauncher', click: () => mainWindow?.show() },
-    { type: 'separator' },
-    { label: 'Quit', click: () => {
-        isQuitting = true;
-        app.quit();
+  console.log('Creating tray with icon:', iconPath);
+
+  if (!fs.existsSync(iconPath)) {
+    console.warn('Tray icon not found at:', iconPath);
+    // On some Linux systems, the tray might not show up without a valid icon
+    // But we should still initialize it if possible, or at least not return early
+    // if we want to handle the 'isQuitting' logic via a tray menu.
+    // However, Tray(null) is not allowed. 
+  }
+
+  try {
+    tray = new Tray(iconPath);
+    const contextMenu = Menu.buildFromTemplate([
+      { label: 'Show AELauncher', click: () => mainWindow?.show() },
+      { type: 'separator' },
+      { label: 'Quit', click: () => {
+          isQuitting = true;
+          app.quit();
+        }
       }
-    }
-  ]);
+    ]);
 
-  tray.setToolTip('AELauncher');
-  tray.setContextMenu(contextMenu);
+    tray.setToolTip('AELauncher');
+    tray.setContextMenu(contextMenu);
 
-  tray.on('click', () => {
-    if (mainWindow?.isVisible()) {
-      mainWindow.hide();
-    } else {
-      mainWindow?.show();
-    }
-  });
+    tray.on('click', () => {
+      if (mainWindow?.isVisible()) {
+        mainWindow.hide();
+      } else {
+        mainWindow?.show();
+        mainWindow?.focus();
+      }
+    });
+  } catch (e) {
+    console.error('Failed to create tray:', e.message);
+  }
 }
 
 function createWindow() {
@@ -142,6 +210,17 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow();
   createTray();
+  checkAndUpdateBackground();
+});
+
+app.on('before-quit', () => {
+  isQuitting = true;
+});
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin' && isQuitting) {
+    app.quit();
+  }
 });
 
 // Settings
@@ -604,4 +683,23 @@ ipcMain.on('window-maximize', () => {
   if (mainWindow?.isMaximized()) mainWindow.unmaximize();
   else mainWindow?.maximize();
 });
-ipcMain.on('window-close', () => mainWindow?.close());
+ipcMain.on('window-close', () => {
+  const settings = loadSettings();
+  if (settings.minimizeToTray) {
+    mainWindow?.hide();
+  } else {
+    isQuitting = true;
+    mainWindow?.close();
+  }
+});
+
+// Check if a process (game) is still running by PID
+ipcMain.handle('is-process-running', (event, pid) => {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0); // signal 0 = existence check, no actual signal sent
+    return true;
+  } catch (e) {
+    return false; // ESRCH = no such process
+  }
+});

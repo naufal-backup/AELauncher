@@ -29,6 +29,10 @@ contextBridge.exposeInMainWorld('electron', {
   // Settings
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+  onSettingsUpdated: (callback) =>
+    ipcRenderer.on('settings-updated', (event, data) => callback(data)),
+  removeSettingsUpdated: () =>
+    ipcRenderer.removeAllListeners('settings-updated'),
 
   // Browse
   browseDirectory: (defaultPath) => ipcRenderer.invoke('browse-directory', defaultPath),
@@ -37,6 +41,7 @@ contextBridge.exposeInMainWorld('electron', {
   // Launch
   checkGameInstalled: (gameDir) => ipcRenderer.invoke('check-game-installed', gameDir),
   launchGame: (opts) => ipcRenderer.invoke('launch-game', opts),
+  isProcessRunning: (pid) => ipcRenderer.invoke('is-process-running', pid),
 
   // Misc
   openExternal: (url) => ipcRenderer.send('open-external', url),

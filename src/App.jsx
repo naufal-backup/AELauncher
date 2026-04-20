@@ -93,7 +93,7 @@ function SettingsModal({ onClose, settings, onSave }) {
   }, []);
 
   const handleInstallProton = async (p) => {
-    const protonDir = local.protonPath || `${window.process?.env?.HOME || '/tmp'}/.local/share/llauncher/proton`;
+    const protonDir = local.protonPath || `${window.process?.env?.HOME || '/tmp'}/.local/share/aelauncher/proton`;
     const tmpArchive = protonDir + '.tar.xz';
     set('protonPath', protonDir);
     setPv(p.version, { phase: 'downloading', progress: 0, msg: '0%' });
@@ -301,7 +301,7 @@ function SettingsModal({ onClose, settings, onSave }) {
                   <input
                     value={local.protonPath}
                     onChange={e => set('protonPath', e.target.value)}
-                    placeholder="/home/user/.local/share/llauncher/proton"
+                    placeholder="/home/user/.local/share/aelauncher/proton"
                   />
                   <button className="browse-btn" onClick={() => browse('protonPath', local.protonPath)}>
                     Browse
@@ -376,7 +376,7 @@ function SettingsModal({ onClose, settings, onSave }) {
               <div className="setting-row toggle-row">
                 <div className="toggle-info">
                   <span className="toggle-label">Launch at startup</span>
-                  <span className="toggle-desc">Automatically start LLauncher when you log in</span>
+                  <span className="toggle-desc">Automatically start AELauncher when you log in</span>
                 </div>
                 <Toggle value={local.launchAtStartup} onChange={v => set('launchAtStartup', v)} />
               </div>
@@ -556,15 +556,19 @@ export default function App() {
   const [isExtracting, setIsExtracting] = useState(false);
   const [isInstalled, setIsInstalled] = useState(false);
   const [extractPercent, setExtractPercent] = useState(0);
-  
+  const [isLaunching, setIsLaunching] = useState(false); // Proton initializing
+  const [isPlaying, setIsPlaying]   = useState(false);   // Game window visible
+  const [gamePid, setGamePid]       = useState(null);
+
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
-  const [totalBytes, setTotalBytes] = useState(0); // 91.81 GB
-  const [totalDownloadSize, setTotalDownloadSize] = useState(0); // ~41.72 GB
+  const [totalBytes, setTotalBytes] = useState(0);
+  const [totalDownloadSize, setTotalDownloadSize] = useState(0);
   const [activePart, setActivePart] = useState(0);
   const [totalParts, setTotalParts] = useState(0);
 
   const progressListenerRef = useRef(false);
+  const playPollRef         = useRef(null);
 
   useEffect(() => {
     const init = async () => {
@@ -575,7 +579,7 @@ export default function App() {
         ]);
         setGameInfo(info);
         setSettings(cfg);
-        
+
         const fullSize = parseInt(info?.pkg?.total_size || '0');
         setTotalBytes(fullSize);
 
@@ -585,7 +589,7 @@ export default function App() {
           setTotalParts(info.pkg.packs.length);
         }
         setTotalDownloadSize(dlSize);
-        
+
         // Initial progress check
         if (info?.pkg?.packs && cfg?.downloadDir) {
           const [initialBytes, completedCount] = await Promise.all([
@@ -641,12 +645,15 @@ export default function App() {
           setExtractPercent(100);
         }
       });
+      window.electron.onSettingsUpdated((newSettings) => {
+        setSettings(newSettings);
+      });
     }
   }, []);
 
   const handleDownload = async () => {
     if (!gameInfo?.pkg?.packs?.length) return;
-    
+
     setIsDownloading(true);
     setIsPaused(false);
 
@@ -657,7 +664,7 @@ export default function App() {
         speedLimit: settings?.speedLimit || 0,
         speedLimitUnit: settings?.speedLimitUnit || 'MB/s',
       });
-      
+
       setIsDownloading(false);
 
       if (result?.status === 'done') {
@@ -679,14 +686,14 @@ export default function App() {
 
   const handleExtract = async () => {
     if (!settings?.downloadDir || !settings?.gameDir) return;
-    
+
     setIsExtracting(true);
     try {
       const result = await window.electron.extractGame({
         downloadDir: settings.downloadDir,
         gameDir: settings.gameDir
       });
-      
+
       if (result?.status === 'done') {
         setIsInstalled(true);
       } else if (result?.status === 'error') {
@@ -706,9 +713,10 @@ export default function App() {
   };
 
   const handleLaunch = async () => {
-    if (!settings) return;
+    if (!settings || isLaunching || isPlaying) return;
+    setIsLaunching(true);
     try {
-      await window.electron.launchGame({
+      const result = await window.electron.launchGame({
         gameDir: settings.gameDir,
         protonPath: settings.protonPath,
         args: settings.launchArgs,
@@ -722,8 +730,31 @@ export default function App() {
         canonicalHole: settings.canonicalHole,
         customEnvVars: settings.customEnvVars,
       });
+
+      if (result?.pid) {
+        setGamePid(result.pid);
+        // Keep "Launching" for ≥5s (Proton + Wine init), then switch to "Playing"
+        setTimeout(() => {
+          setIsLaunching(false);
+          setIsPlaying(true);
+        }, 5000);
+
+        // Poll every 3s — reset when game process exits
+        playPollRef.current = setInterval(async () => {
+          const alive = await window.electron.isProcessRunning(result.pid);
+          if (!alive) {
+            clearInterval(playPollRef.current);
+            setIsPlaying(false);
+            setIsLaunching(false);
+            setGamePid(null);
+          }
+        }, 3000);
+      } else {
+        setIsLaunching(false);
+      }
     } catch (e) {
       console.error('Launch error:', e);
+      setIsLaunching(false);
     }
   };
 
@@ -757,14 +788,14 @@ export default function App() {
   const statusLabel = isInstalled
     ? 'Ready to play'
     : isExtracting
-    ? `Extracting ${extractPercent}%`
-    : isDownloading
-    ? `Downloading Part ${activePart + 1} / ${totalParts}`
-    : isDownloadComplete
-    ? 'Download complete'
-    : isPaused
-    ? 'Paused'
-    : 'Ready to download';
+      ? `Extracting ${extractPercent}%`
+      : isDownloading
+        ? `Downloading Part ${activePart + 1} / ${totalParts}`
+        : isDownloadComplete
+          ? 'Download complete'
+          : isPaused
+            ? 'Paused'
+            : 'Ready to download';
 
   const bgStyle = settings?.backgroundPath ? {
     backgroundImage: `url("local-resource://${settings.backgroundPath}")`,
@@ -791,171 +822,183 @@ export default function App() {
         </div>
       </div>
       <div className="launcher-body">
-      <nav className="sidebar">
-        <div className="logo-circle">AE</div>
-        <div className="nav-items">
-          <button className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')} title="Home">
-            <Play size={20} />
-          </button>
-          <button className={activeTab === 'setup' ? 'active' : ''} onClick={() => setActiveTab('setup')} title="Linux Setup">
-            <Cpu size={20} />
-          </button>
-        </div>
-        <div className="nav-footer no-drag">
-          <button onClick={() => setShowSettings(true)} title="Settings">
-            <Settings size={20} />
-          </button>
-          <button onClick={() => window.electron.openExternal('https://github.com/dawn-winery')} title="GitHub">
-            <Globe size={20} />
-          </button>
-        </div>
-      </nav>
+        <nav className="sidebar">
+          <div className="logo-circle">AE</div>
+          <div className="nav-items">
+            <button className={activeTab === 'home' ? 'active' : ''} onClick={() => setActiveTab('home')} title="Home">
+              <Play size={20} />
+            </button>
+            <button className={activeTab === 'setup' ? 'active' : ''} onClick={() => setActiveTab('setup')} title="Linux Setup">
+              <Cpu size={20} />
+            </button>
+          </div>
+          <div className="nav-footer no-drag">
+            <button onClick={() => setShowSettings(true)} title="Settings">
+              <Settings size={20} />
+            </button>
+            <button onClick={() => window.electron.openExternal('https://github.com/dawn-winery')} title="GitHub">
+              <Globe size={20} />
+            </button>
+          </div>
+        </nav>
 
-      <main className="content">
-        <AnimatePresence mode="wait">
-          {loading ? (
-            <div key="loading" className="loader-container">
-              <div className="spinner" />
-              <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 14 }}>Loading...</span>
-            </div>
-          ) : activeTab === 'home' ? (
-            <motion.div
-              key="home"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="tab-content home"
-            >
-              <div className="hero-section">
-                <h1>Arknights: Endfield</h1>
-                <div className="version-badge">v{gameInfo?.version || '1.1.9'}</div>
+        <main className="content">
+          <AnimatePresence mode="wait">
+            {loading ? (
+              <div key="loading" className="loader-container">
+                <div className="spinner" />
+                <span style={{ color: 'rgba(255,255,255,0.4)', fontSize: 14 }}>Loading...</span>
+              </div>
+            ) : activeTab === 'home' ? (
+              <motion.div
+                key="home"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="tab-content home"
+              >
+                <div className="hero-section">
+                  <h1>Arknights: Endfield</h1>
+                  <div className="version-badge">v{gameInfo?.version || '1.1.9'}</div>
 
-                <div className="download-card">
-                  <div className="card-header">
-                    <div className="card-info">
-                      <span className="size-label">{gameSize}</span>
-                      <span className="status-label">{statusLabel}</span>
-                    </div>
-
-                    <div className="btn-group">
-                      {isInstalled ? (
-                        <button className="main-btn no-drag" onClick={handleLaunch}>
-                          <Play size={20} />
-                          <span>Play</span>
-                        </button>
-                      ) : isExtracting ? (
-                        <button className="main-btn no-drag disabled" disabled>
-                          <RotateCcw className="spin" size={20} />
-                          <span>Extracting</span>
-                        </button>
-                      ) : isDownloading ? (
-                        <button className="main-btn pause-btn no-drag" onClick={handlePause}>
-                          <Pause size={20} />
-                          <span>Pause</span>
-                        </button>
-                      ) : isDownloadComplete ? (
-                        <button className="main-btn no-drag" onClick={handleExtract}>
-                          <RotateCcw size={20} />
-                          <span>Extract</span>
-                        </button>
-                      ) : (
-                        <>
-                          <button className="main-btn no-drag" onClick={handleDownload}>
-                            {isPaused ? <RotateCcw size={20} /> : <Download size={20} />}
-                            <span>{isPaused ? 'Resume' : 'Download'}</span>
-                          </button>
-                          {isPaused || downloadedBytes > 0 ? null : (
-                            <button className="launch-btn no-drag" onClick={handleLaunch} title="Launch Game (Direct)">
-                              <Play size={20} />
-                            </button>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  </div>
-
-                  {(isDownloading || isPaused || downloadedBytes > 0 || isExtracting) && !isInstalled && (
-                    <div className="progress-container">
-                      <div className="progress-bar-bg">
-                        <motion.div
-                          className="progress-fill"
-                          style={{ width: (isExtracting ? extractPercent : progress) + '%' }}
-                          initial={false}
-                          animate={{ width: (isExtracting ? extractPercent : progress) + '%' }}
-                          transition={{ ease: 'linear', duration: 0.3 }}
-                        />
+                  <div className="download-card">
+                    <div className="card-header">
+                      <div className="card-info">
+                        <span className="size-label">{gameSize}</span>
+                        <span className="status-label">{statusLabel}</span>
                       </div>
-                      <div className="progress-stats">
-                        {isExtracting ? (
-                          <span>Extracting {extractPercent}%</span>
+
+                      <div className="btn-group">
+                        {isInstalled ? (
+                          isLaunching ? (
+                            <button className="main-btn no-drag disabled" disabled>
+                              <RotateCcw className="spin" size={20} />
+                              <span>Launching...</span>
+                            </button>
+                          ) : isPlaying ? (
+                            <button className="main-btn no-drag disabled" disabled style={{ opacity: 0.7 }}>
+                              <Play size={20} />
+                              <span>Playing</span>
+                            </button>
+                          ) : (
+                            <button className="main-btn no-drag" onClick={handleLaunch}>
+                              <Play size={20} />
+                              <span>Play</span>
+                            </button>
+                          )
+                        ) : isExtracting ? (
+                          <button className="main-btn no-drag disabled" disabled>
+                            <RotateCcw className="spin" size={20} />
+                            <span>Extracting</span>
+                          </button>
+                        ) : isDownloading ? (
+                          <button className="main-btn pause-btn no-drag" onClick={handlePause}>
+                            <Pause size={20} />
+                            <span>Pause</span>
+                          </button>
+                        ) : isDownloadComplete ? (
+                          <button className="main-btn no-drag" onClick={handleExtract}>
+                            <RotateCcw size={20} />
+                            <span>Extract</span>
+                          </button>
                         ) : (
                           <>
-                            <span>{progress.toFixed(1)}%</span>
-                            <span>{fmtBytes(downloadedBytes)} / {fmtBytes(totalDownloadSize)}</span>
-                            {isDownloading && <span>{fmtSpeed(downloadSpeed)}</span>}
+                            <button className="main-btn no-drag" onClick={handleDownload}>
+                              {isPaused ? <RotateCcw size={20} /> : <Download size={20} />}
+                              <span>{isPaused ? 'Resume' : 'Download'}</span>
+                            </button>
+                            {isPaused || downloadedBytes > 0 ? null : (
+                              <button className="launch-btn no-drag" onClick={handleLaunch} title="Launch Game (Direct)">
+                                <Play size={20} />
+                              </button>
+                            )}
                           </>
                         )}
                       </div>
                     </div>
-                  )}
-                </div>
-              </div>
-            </motion.div>
-          ) : (
-            <motion.div
-              key="setup"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="tab-content setup"
-            >
-              <h2>Linux Setup</h2>
-              <p className="section-desc">
-                Configure Proton and environment settings in{' '}
-                <button
-                  className="link-btn"
-                  onClick={() => setShowSettings(true)}
-                >
-                  Settings → Proton
-                </button>
-              </p>
 
-              <div className="setup-info-card">
-                <Gamepad2 size={24} color="#facc15" />
-                <div>
-                  <h4>DWProton Configuration</h4>
-                  <p>
-                    Open Settings to download and configure DWProton versions,
-                    set launch options, Vulkan, Wayland, DXVK, and more.
-                  </p>
-                  <button className="main-btn no-drag" style={{ marginTop: 12 }} onClick={() => setShowSettings(true)}>
-                    <Settings size={16} />
-                    <span>Open Settings</span>
-                  </button>
-                </div>
-              </div>
-
-              <div className="setup-info-card" style={{ marginTop: 16 }}>
-                <Zap size={24} color="#facc15" />
-                <div>
-                  <h4>Current Configuration</h4>
-                  <div className="config-tags">
-                    {settings?.nativeVulkan && <span className="config-tag">Vulkan</span>}
-                    {settings?.wayland && <span className="config-tag">Wayland</span>}
-                    {settings?.dxvkAsync && <span className="config-tag">DXVK Async</span>}
-                    {settings?.gameMode && <span className="config-tag">GameMode</span>}
-                    {settings?.mangoHud && <span className="config-tag">MangoHud</span>}
-                    {settings?.canonicalHole && <span className="config-tag config-tag-exp">Canonical Hole</span>}
+                    {(isDownloading || isPaused || downloadedBytes > 0 || isExtracting) && !isInstalled && (
+                      <div className="progress-container">
+                        <div className="progress-bar-bg">
+                          <motion.div
+                            className="progress-fill"
+                            style={{ width: (isExtracting ? extractPercent : progress) + '%' }}
+                            initial={false}
+                            animate={{ width: (isExtracting ? extractPercent : progress) + '%' }}
+                            transition={{ ease: 'linear', duration: 0.3 }}
+                          />
+                        </div>
+                        <div className="progress-stats">
+                          {isExtracting ? (
+                            <span>Extracting {extractPercent}%</span>
+                          ) : (
+                            <>
+                              <span>{progress.toFixed(1)}%</span>
+                              <span>{fmtBytes(downloadedBytes)} / {fmtBytes(totalDownloadSize)}</span>
+                              {isDownloading && <span>{fmtSpeed(downloadSpeed)}</span>}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                  <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 8 }}>
-                    Proton: {settings?.protonPath || 'Not configured'}
-                  </p>
                 </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </main>
+              </motion.div>
+            ) : (
+              <motion.div
+                key="setup"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="tab-content setup"
+              >
+                <h2>Linux Setup</h2>
+                <p className="section-desc">
+                  Configure Proton and environment settings in{' '}
+                  <button
+                    className="link-btn"
+                    onClick={() => setShowSettings(true)}
+                  >
+                    Settings → Proton
+                  </button>
+                </p>
+
+                <div className="setup-info-card">
+                  <Gamepad2 size={24} color="#facc15" />
+                  <div>
+                    <h4>DWProton Configuration</h4>
+                    <p>
+                      Open Settings to download and configure DWProton versions,
+                      set launch options, Vulkan, Wayland, DXVK, and more.
+                    </p>
+                    <button className="main-btn no-drag" style={{ marginTop: 12 }} onClick={() => setShowSettings(true)}>
+                      <Settings size={16} />
+                      <span>Open Settings</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="setup-info-card" style={{ marginTop: 16 }}>
+                  <Zap size={24} color="#facc15" />
+                  <div>
+                    <h4>Current Configuration</h4>
+                    <div className="config-tags">
+                      {settings?.nativeVulkan && <span className="config-tag">Vulkan</span>}
+                      {settings?.wayland && <span className="config-tag">Wayland</span>}
+                      {settings?.dxvkAsync && <span className="config-tag">DXVK Async</span>}
+                      {settings?.gameMode && <span className="config-tag">GameMode</span>}
+                      {settings?.mangoHud && <span className="config-tag">MangoHud</span>}
+                      {settings?.canonicalHole && <span className="config-tag config-tag-exp">Canonical Hole</span>}
+                    </div>
+                    <p style={{ fontSize: 13, color: 'rgba(255,255,255,0.4)', marginTop: 8 }}>
+                      Proton: {settings?.protonPath || 'Not configured'}
+                    </p>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </main>
       </div>
 
       {/* Settings Modal */}

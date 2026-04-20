@@ -369,6 +369,66 @@ function buildLaunchEnv(opts = {}) {
   return env;
 }
 
+/**
+ * Download an image from a URL to a local path.
+ * @param {string} url
+ * @param {string} savePath
+ * @returns {Promise<boolean>}
+ */
+async function downloadImage(url, savePath) {
+  const axios = require('axios');
+  const fs = require('fs');
+  const path = require('path');
+
+  try {
+    const dir = path.dirname(savePath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    const response = await axios({
+      url,
+      method: 'GET',
+      responseType: 'stream'
+    });
+
+    return new Promise((resolve, reject) => {
+      const writer = fs.createWriteStream(savePath);
+      response.data.pipe(writer);
+      writer.on('finish', () => resolve(true));
+      writer.on('error', (err) => {
+        fs.unlink(savePath, () => {}); // Clean up partial file
+        reject(err);
+      });
+    });
+  } catch (error) {
+    console.error(`Failed to download image from ${url}:`, error.message);
+    return false;
+  }
+}
+
+/**
+ * Attempt to find the latest KV (Key Visual) from the official website.
+ * @returns {Promise<string|null>} URL of the latest background image
+ */
+async function findLatestBackground() {
+  const axios = require('axios');
+  try {
+    const response = await axios.get('https://endfield.gryphline.com/', { timeout: 10000 });
+    const html = response.data;
+    
+    // Look for patterns like https://web-static.hg-cdn.com/endfield/official-v4/_next/static/media/kv_...jpg
+    const regex = /https:\/\/web-static\.hg-cdn\.com\/endfield\/official-v4\/_next\/static\/media\/kv_[^"']+\.(?:jpg|png|webp)/g;
+    const matches = html.match(regex);
+    
+    if (matches && matches.length > 0) {
+      // Return the first match (usually the main KV)
+      return matches[0];
+    }
+  } catch (error) {
+    console.error('Failed to fetch latest background info:', error.message);
+  }
+  return null;
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -384,4 +444,6 @@ module.exports = {
   extractGameParts,
   extractProtonArchive,
   buildLaunchEnv,
+  downloadImage,
+  findLatestBackground,
 };

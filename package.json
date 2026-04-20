@@ -15,6 +15,10 @@
       "output": "dist_electron",
       "buildResources": "build"
     },
+    "asar": true,
+    "asarUnpack": [
+      "**/electron/icon.png"
+    ],
     "files": [
       "dist/**/*",
       "electron/**/*",
