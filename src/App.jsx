@@ -559,6 +559,7 @@ export default function App() {
   const [isLaunching, setIsLaunching] = useState(false); // Proton initializing
   const [isPlaying, setIsPlaying]   = useState(false);   // Game window visible
   const [gamePid, setGamePid]       = useState(null);
+  const [localVersion, setLocalVersion] = useState(null);
 
   const [downloadedBytes, setDownloadedBytes] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
@@ -612,8 +613,12 @@ export default function App() {
 
         // Check if installed
         if (cfg?.gameDir) {
-          const installed = await window.electron.checkGameInstalled(cfg.gameDir);
+          const [installed, lVer] = await Promise.all([
+            window.electron.checkGameInstalled(cfg.gameDir),
+            window.electron.getLocalVersion(cfg.gameDir)
+          ]);
           setIsInstalled(installed);
+          setLocalVersion(lVer);
         }
       } catch (e) {
         console.error(e);
@@ -695,10 +700,12 @@ export default function App() {
         packs: gameInfo.pkg.packs,
         speedLimit: settings?.speedLimit || 0,
         speedLimitUnit: settings?.speedLimitUnit || 'MB/s',
+        version: gameInfo.version,
       });
 
       if (result?.status === 'done') {
         setIsInstalled(true);
+        setLocalVersion(gameInfo.version);
       } else if (result?.status === 'error') {
         console.error('Extraction error:', result.message);
       }
@@ -771,6 +778,8 @@ export default function App() {
   // Download is complete when we reach totalDownloadSize (~41GB)
   const isDownloadComplete = totalDownloadSize > 0 && downloadedBytes >= totalDownloadSize;
 
+  const isUpdateAvailable = isInstalled && localVersion && gameInfo?.version && localVersion !== gameInfo.version;
+
   const fmtBytes = (b) => {
     if (b >= 1e9) return (b / 1e9).toFixed(2) + ' GB';
     if (b >= 1e6) return (b / 1e6).toFixed(1) + ' MB';
@@ -789,7 +798,7 @@ export default function App() {
     : (totalBytes / 1e9).toFixed(2) + ' GB';
 
   const statusLabel = isInstalled
-    ? 'Ready to play'
+    ? (isUpdateAvailable ? 'Update available' : 'Ready to play')
     : isExtracting
       ? `Extracting ${extractPercent}%`
       : isDownloading
@@ -882,6 +891,11 @@ export default function App() {
                             <button className="main-btn no-drag disabled" disabled style={{ opacity: 0.7 }}>
                               <Play size={20} />
                               <span>Playing</span>
+                            </button>
+                          ) : isUpdateAvailable ? (
+                            <button className="main-btn no-drag" onClick={handleDownload}>
+                              <RefreshCw size={20} />
+                              <span>Update</span>
                             </button>
                           ) : (
                             <button className="main-btn no-drag" onClick={handleLaunch}>

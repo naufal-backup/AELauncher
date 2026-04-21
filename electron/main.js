@@ -563,7 +563,7 @@ ipcMain.handle('download-file', async (event, { url, savePath, startByte = 0 }) 
 });
 
 // Extract game parts (split ZIP — merge all parts then extract with 7z)
-ipcMain.handle('extract-game', async (event, { downloadDir, gameDir, packs, speedLimit, speedLimitUnit }) => {
+ipcMain.handle('extract-game', async (event, { downloadDir, gameDir, packs, speedLimit, speedLimitUnit, version }) => {
   if (!fs.existsSync(gameDir)) fs.mkdirSync(gameDir, { recursive: true });
 
   // --- STEP 1: AUTOMATIC INTEGRITY CHECK & RECOVERY ---
@@ -649,6 +649,12 @@ ipcMain.handle('extract-game', async (event, { downloadDir, gameDir, packs, spee
   // --- STEP 3: CLEANUP DOWNLOAD PARTS ON SUCCESS ---
   if (result.status === 'done') {
     console.log('[Extract] Extraction successful. Cleaning up download parts...');
+    
+    // Save the game version
+    if (version) {
+      utils.saveLocalGameVersion(gameDir, version);
+    }
+
     event.sender.send('extract-progress', { status: 'extracting', message: 'Cleaning up...' });
     
     for (const partPath of partPaths) {
@@ -665,6 +671,8 @@ ipcMain.handle('extract-game', async (event, { downloadDir, gameDir, packs, spee
 
   return result;
 });
+
+ipcMain.handle('get-local-version', (event, gameDir) => utils.getLocalGameVersion(gameDir));
 
 
 

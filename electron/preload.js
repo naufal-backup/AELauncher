@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('electron', {
 
   // Launch
   checkGameInstalled: (gameDir) => ipcRenderer.invoke('check-game-installed', gameDir),
+  getLocalVersion: (gameDir) => ipcRenderer.invoke('get-local-version', gameDir),
   launchGame: (opts) => ipcRenderer.invoke('launch-game', opts),
   isProcessRunning: (pid) => ipcRenderer.invoke('is-process-running', pid),
 

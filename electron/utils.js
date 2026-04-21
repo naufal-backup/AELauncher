@@ -452,6 +452,42 @@ function calculateMD5(filePath) {
   });
 }
 
+/**
+ * Get the local game version from version.txt in gameDir.
+ * @param {string} gameDir
+ * @returns {string|null}
+ */
+function getLocalGameVersion(gameDir) {
+  const fs = require('fs');
+  const path = require('path');
+  const versionPath = path.join(gameDir, 'version.txt');
+  try {
+    if (fs.existsSync(versionPath)) {
+      return fs.readFileSync(versionPath, 'utf8').trim();
+    }
+  } catch (e) {
+    console.error('Failed to read local version:', e.message);
+  }
+  return null;
+}
+
+/**
+ * Save the game version to version.txt in gameDir.
+ * @param {string} gameDir
+ * @param {string} version
+ */
+function saveLocalGameVersion(gameDir, version) {
+  const fs = require('fs');
+  const path = require('path');
+  const versionPath = path.join(gameDir, 'version.txt');
+  try {
+    if (!fs.existsSync(gameDir)) fs.mkdirSync(gameDir, { recursive: true });
+    fs.writeFileSync(versionPath, version, 'utf8');
+  } catch (e) {
+    console.error('Failed to save local version:', e.message);
+  }
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -470,4 +506,6 @@ module.exports = {
   downloadImage,
   findLatestBackground,
   calculateMD5,
+  getLocalGameVersion,
+  saveLocalGameVersion,
 };
